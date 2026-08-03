@@ -33,8 +33,10 @@ import {
   ENGAGEMENT_GRANT_KIND,
   engagementAccount,
   type AccountIdentity,
+  type Actor,
   type TokenAssetCode,
 } from '@cloudsforge/contracts-money'
+import type { LedgerClient } from './ledgerclient.ts'
 import type { Db } from './outbox.ts'
 import { withOutbox } from './outbox.ts'
 import { VENUE_BOOKED } from './topics.ts'
@@ -494,24 +496,216 @@ export async function listListingsOf(sql: Db, subject: string): Promise<Listing[
 
 /* -------------------------------------------------------------------------------- bookings */
 
+export interface Booking {
+  readonly id: string
+  readonly parcelId: string
+  readonly wardId: string
+  readonly ownerSubject: string
+  readonly bookedBy: string
+  readonly slot: string
+  readonly hours: number
+  readonly endsAt: string
+  readonly priceWei: bigint
+  readonly status: BookingStatus
+  readonly reservationId: string | null
+  readonly releasedEntryId: string | null
+  readonly settledEntryId: string | null
+  readonly createdAt: string
+  readonly closedAt: string | null
+}
+
+export type BookingStatus = 'open' | 'settled' | 'cancelled'
+
+interface BookingRow {
+  readonly id: string
+  readonly parcel_id: string
+  readonly ward_id: string
+  readonly owner_subject: string
+  readonly booked_by: string
+  readonly slot: Date
+  readonly hours: number
+  readonly price_wei: string
+  readonly status: string
+  readonly reservation_id: string | null
+  readonly released_entry_id: string | null
+  readonly settled_entry_id: string | null
+  readonly created_at: Date
+  readonly closed_at: Date | null
+}
+
+/** Every column of a booking plus the two the parcel owns. Bookings are always read with their venue. */
+const BOOKING_COLUMNS = `b.id, b.parcel_id, b.slot, b.hours, b.booked_by, b.price_wei, b.status,
+  b.reservation_id, b.released_entry_id, b.settled_entry_id, b.created_at, b.closed_at,
+  p.ward_id, p.owner_subject`
+
+function toBooking(row: BookingRow): Booking {
+  const ends = new Date(row.slot.getTime() + row.hours * 3_600_000)
+  return {
+    id: row.id,
+    parcelId: row.parcel_id,
+    wardId: row.ward_id,
+    ownerSubject: row.owner_subject,
+    bookedBy: row.booked_by,
+    slot: row.slot.toISOString(),
+    hours: row.hours,
+    endsAt: ends.toISOString(),
+    // `parseWei`, not `BigInt`, for the reason this file repeats: `BigInt('')` is `0n`, and a
+    // price that silently became zero is the exact defect the schema now refuses.
+    priceWei: parsePriceWei(row.price_wei, 'price_wei'),
+    status: row.status as BookingStatus,
+    reservationId: row.reservation_id,
+    releasedEntryId: row.released_entry_id,
+    settledEntryId: row.settled_entry_id,
+    createdAt: row.created_at.toISOString(),
+    closedAt: row.closed_at?.toISOString() ?? null,
+  }
+}
+
+export interface Venue {
+  readonly parcelId: string
+  readonly wardId: string
+  readonly ownerSubject: string
+  /** Per hour, in wei. Never null — a parcel with no posted rate is not a Venue. */
+  readonly rateWei: bigint
+}
+
+/**
+ * A parcel's Venue terms, or `null` if it has none.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE PRICE OF AN HOUR IS READ FROM THE OWNER'S PARCEL, WHICH IS THE WHOLE ANSWER TO "WHO PRICES
+ * A SLOT".
+ *
+ * Migration 14 argues the decision; this is the read side of it. A route asks what an hour costs
+ * BEFORE it escrows anything, because the amount it reserves has to be the amount the booking
+ * will be written for — and `bookings_price_is_the_owners_rate` (the venue trigger) refuses the
+ * insert if it is not.
+ *
+ * `rateWei` is non-nullable in the returned shape and that is not a convenience: the parcel-level
+ * `tessera_a_venue_posts_a_rate` CHECK makes `is_venue and venue_rate_wei is null` unrepresentable,
+ * so the null branch here is the "not a Venue" branch and nothing else.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export async function venueOf(sql: Db, parcelId: string): Promise<Venue | null> {
+  const rows = await sql<
+    { ward_id: string; owner_subject: string; venue_rate_wei: string | null; status: string }[]
+  >`
+    select ward_id, owner_subject, venue_rate_wei, status
+      from parcels where id = ${parcelId} and is_venue = true and status = 'held'
+  `
+  const row = rows[0]
+  if (!row || row.venue_rate_wei === null) return null
+  return {
+    parcelId,
+    wardId: row.ward_id,
+    ownerSubject: row.owner_subject,
+    rateWei: parsePriceWei(row.venue_rate_wei, 'venueRateWei'),
+  }
+}
+
+/**
+ * Open a Venue, or re-price one. **The owner's act, and the only way a Venue comes into being.**
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * WHY THIS IS NOT A FLAG ON `setParcelFlags`.
+ *
+ * Two reasons, and either alone would be enough.
+ *
+ *   1. **A Venue without terms is unrepresentable** (`tessera_a_venue_posts_a_rate`), so raising
+ *      the flag and posting the rate are one statement or they are a constraint violation. Two
+ *      calls would mean a window in which the parcel is a Venue at no price, which is the exact
+ *      thing this feature exists to make impossible.
+ *   2. **`world.ts` may not touch money.** §12's test 4 scans that module for the vocabulary of a
+ *      sale and asserts it imports nothing that can move value — not `sparks.ts`, not this file.
+ *      A rate column on `Parcel` would have ended that guarantee quietly, and the guarantee is
+ *      §7's fourth refusal: land is claimed, never bought.
+ *
+ * Re-pricing an open Venue is allowed and affects NOTHING already booked: every booking snapshots
+ * `price_wei` at insert and `bookings_terms_are_written_once` refuses to let it move afterwards,
+ * which is `listings`' rule (§7.2, "snapshotted onto each listing at creation") applied to an hour
+ * instead of an object.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export async function openVenue(
+  sql: Db,
+  parcelId: string,
+  ownerSubject: string,
+  rateWei: bigint,
+): Promise<Venue> {
+  try {
+    const rows = await sql<{ ward_id: string }[]>`
+      update parcels
+         set is_venue = true, venue_rate_wei = ${rateWei.toString()}::numeric, last_edit_at = now()
+       where id = ${parcelId} and owner_subject = ${ownerSubject} and status = 'held'
+      returning ward_id
+    `
+    const row = rows[0]
+    if (!row) throw new WorldError('not_found', 'no such parcel, or it is not yours', 404)
+    return { parcelId, wardId: row.ward_id, ownerSubject, rateWei }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (message.includes('tessera_venue_rate_is_positive')) {
+      throw new WorldError('free_venue', 'an hour of a Venue costs more than nothing', 400)
+    }
+    if (message.includes('tessera_venue_rate_whole_sparks')) {
+      throw new WorldError('rate_not_whole_sparks', 'a venue rate is a whole number of Sparks', 400)
+    }
+    throw err
+  }
+}
+
+export async function findBooking(sql: Db, id: string): Promise<Booking | null> {
+  const rows = await sql<BookingRow[]>`
+    select ${sql.unsafe(BOOKING_COLUMNS)}
+      from bookings b join parcels p on p.id = b.parcel_id
+     where b.id = ${id}
+  `
+  const row = rows[0]
+  return row ? toBooking(row) : null
+}
+
+/** A Venue's calendar from now forward. The open holds are the ones that block a slot. */
+export async function listBookingsOf(sql: Db, parcelId: string): Promise<Booking[]> {
+  const rows = await sql<BookingRow[]>`
+    select ${sql.unsafe(BOOKING_COLUMNS)}
+      from bookings b join parcels p on p.id = b.parcel_id
+     where b.parcel_id = ${parcelId} order by b.slot asc limit 200
+  `
+  return rows.map(toBooking)
+}
+
 export interface BookInput {
   readonly parcelId: string
   readonly slot: Date
+  /** Whole hours, 1–12. A booking is a SPAN; `tessera_no_overlapping_bookings` is what enforces it. */
+  readonly hours: number
   readonly bookedBy: string
-  readonly priceWei: bigint
+  /**
+   * What the caller actually escrowed with the ledger, in wei.
+   *
+   * **Not a price.** The price is the owner's, read from the parcel below under the same lock, and
+   * this number is checked against it — a booker who escrows less than the posted rate is refused
+   * rather than accommodated. Named `escrowedWei` and not `priceWei` so the difference cannot be
+   * lost in a rename: the old field WAS the price, taken from whoever called, and `price_wei >= 0`
+   * meant a stranger could hold an hour of somebody else's calendar for nothing.
+   */
+  readonly escrowedWei: bigint
   /** The ledger reservation that holds the money. An open booking without one is refused. */
   readonly reservationId: string
   readonly correlationId: string
 }
 
 /**
- * Book a slot on a Venue's calendar, against an escrowed ledger hold.
+ * Book a span of a Venue's calendar, against an escrowed ledger hold.
  *
  * §8.2's shape, not a new one: "Reserving funds is a posting from `available` to `reserved`, which
  * makes a reservation auditable, reversible and impossible to lose track of"
  * (`ledger/src/accounts.ts:9`). The reservation is taken by the route before this is called, and
  * `bookings_open_holds_money` refuses an open booking that names none — so a free hold on somebody
  * else's calendar is unrepresentable rather than discouraged.
+ *
+ * **The price is not an argument.** It is `venue_rate_wei * hours`, computed here from the parcel
+ * row this function already locks, and checked again by the database in the same statement.
  */
 export async function bookVenue(sql: Db, input: BookInput): Promise<{ bookingId: string }> {
   try {
@@ -531,17 +725,45 @@ export async function bookVenue(sql: Db, input: BookInput): Promise<{ bookingId:
       // that carries a price and a reservation would be telling the wrong person they are owed
       // money. Locked in the same order `moveParcel` locks, so the two serialise.
       // ═══════════════════════════════════════════════════════════════════════════════════════
-      const owners = await tx<{ owner_subject: string; ward_id: string }[]>`
-        select owner_subject, ward_id from parcels where id = ${input.parcelId} for update
+      const owners = await tx<
+        { owner_subject: string; ward_id: string; venue_rate_wei: string | null }[]
+      >`
+        select owner_subject, ward_id, venue_rate_wei
+          from parcels where id = ${input.parcelId} for update
       `
       const parcel = owners[0]
       if (!parcel) throw new WorldError('not_found', 'no such parcel', 404)
 
-      const rows = await tx<{ id: string; parcel_id: string; slot: Date }[]>`
-        insert into bookings (parcel_id, slot, booked_by, price_wei, reservation_id)
-        values (${input.parcelId}, ${input.slot}, ${input.bookedBy},
-                ${input.priceWei.toString()}::numeric, ${input.reservationId})
-        returning id, parcel_id, slot
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      // THE PRICE IS THE OWNER'S, RE-READ UNDER THE LOCK, AND THE ESCROW HAS TO MATCH IT.
+      //
+      // The route read the rate a moment ago to know what to reserve. Between that read and this
+      // lock the owner may have re-priced their Venue, and the two failure modes are not
+      // symmetric: escrowing MORE than the price would silently overcharge a booker, and escrowing
+      // LESS would open a booking the hold does not cover — a partly-free slot, which is the same
+      // defect as a free one with a smaller number in it.
+      //
+      // So neither is accommodated. `rate_moved` is a 409 the client retries into the new price,
+      // and the route releases the hold it took. The alternative — trusting `escrowedWei` as the
+      // price — is exactly the unsourced input this whole change exists to remove.
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      if (parcel.venue_rate_wei === null) {
+        throw new WorldError('not_a_venue', 'that parcel posts no venue rate', 409)
+      }
+      const priceWei = parsePriceWei(parcel.venue_rate_wei, 'venueRateWei') * BigInt(input.hours)
+      if (input.escrowedWei !== priceWei) {
+        throw new WorldError(
+          'rate_moved',
+          `the owner's rate now prices this booking at ${priceWei} wei, not the ${input.escrowedWei} held`,
+          409,
+        )
+      }
+
+      const rows = await tx<{ id: string; parcel_id: string; slot: Date; hours: number }[]>`
+        insert into bookings (parcel_id, slot, hours, booked_by, price_wei, reservation_id)
+        values (${input.parcelId}, ${input.slot}, ${input.hours}, ${input.bookedBy},
+                ${priceWei.toString()}::numeric, ${input.reservationId})
+        returning id, parcel_id, slot, hours
       `
       const row = rows[0]
       if (!row) throw new WorldError('not_booked', 'the booking did not land')
@@ -565,10 +787,17 @@ export async function bookVenue(sql: Db, input: BookInput): Promise<{ bookingId:
           parcelId: row.parcel_id,
           wardId: parcel.ward_id,
           slot: row.slot.toISOString(),
+          // A booking is a SPAN, so a consumer rendering a calendar needs its end. Additive to a
+          // `1.0` payload and read by nobody yet — notify's rule takes `ownerSubject` and the
+          // parcel — but a diary entry with no end time is not a diary entry.
+          hours: row.hours,
+          endsAt: new Date(row.slot.getTime() + row.hours * 3_600_000).toISOString(),
           // The party this event is ABOUT, and the one being paid. First of the pair on purpose.
           ownerSubject: parcel.owner_subject,
           bookedBy: input.bookedBy,
-          priceWei: input.priceWei.toString(),
+          // The OWNER's number, not the caller's. `input.escrowedWei` is only ever checked against
+          // this; publishing it instead would put an unverified figure on the bus.
+          priceWei: priceWei.toString(),
           reservationId: input.reservationId,
         },
         actor: `user:${input.bookedBy.slice('user:'.length)}`,
@@ -578,20 +807,194 @@ export async function bookVenue(sql: Db, input: BookInput): Promise<{ bookingId:
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    if (message.includes('tessera_one_open_booking')) {
-      throw new WorldError('slot_taken', 'that slot is already booked', 409)
+    if (
+      message.includes('tessera_one_open_booking') ||
+      message.includes('tessera_no_overlapping_bookings')
+    ) {
+      // Both names mean one thing to a caller: somebody already holds that time. The exclusion
+      // constraint is the general rule and the unique index its equal-slot case (migration 14), so
+      // which one fires is an implementation detail and neither is a different answer.
+      throw new WorldError('slot_taken', 'that span of the calendar is already booked', 409)
     }
     if (message.includes('is not a Venue')) {
       throw new WorldError('not_a_venue', message, 409)
     }
+    if (message.includes('bookings_price_is_the_owners_rate')) {
+      throw new WorldError('rate_moved', message, 409)
+    }
+    if (message.includes('bookings_are_not_your_own_venue')) {
+      throw new WorldError('own_venue', 'a Venue is not booked by the person who owns it', 409)
+    }
     if (message.includes('bookings_slot_is_on_the_hour')) {
       throw new WorldError('slot_not_on_the_hour', 'a booking slot is on the hour', 400)
+    }
+    if (message.includes('bookings_hours_are_a_working_day')) {
+      throw new WorldError('bad_span', 'a booking runs between 1 and 12 whole hours', 400)
     }
     if (message.includes('bookings_open_holds_money')) {
       throw new WorldError('no_hold', 'an open booking must hold an escrowed reservation', 400)
     }
+    if (message.includes('tessera_booking_price_is_positive')) {
+      throw new WorldError('free_hold', 'a booking is never free — 23-tessera.md §6.4', 400)
+    }
     throw err
   }
+}
+
+/**
+ * The ledger, as much of it as closing a booking needs.
+ *
+ * `Pick` of the real interface rather than a hand-written shape, so a double that satisfies this
+ * satisfies the client — and imported `type`-only, which is what keeps `economy.ts` and
+ * `ledgerclient.ts` from becoming a runtime import cycle. `ledgerclient.ts` reads
+ * `GRANT_ENTRY_KIND`, `AVAILABLE` and `PAYOUT_DUE` from this file; a value import back the other
+ * way would close the loop, and that is why the fee's two postings are built over there, next to
+ * `holder` and the account literals `micro-conformance` reads, rather than here.
+ */
+export type BookingLedger = Pick<LedgerClient, 'payBookingFee' | 'release'>
+
+export interface CloseInput {
+  readonly bookingId: string
+  /** Who asked. Checked against the booking's own two parties by the caller, not here. */
+  readonly actor: Actor
+  readonly correlationId: string
+}
+
+/**
+ * Settle a booking: the hour was hosted, so the hold is released and the fee is paid to the owner.
+ *
+ * §8.4 lists venue bookings under **Earned**, and Tessera is the only service in the estate that
+ * holds a calendar — there is no market order behind this and nobody else to double the payment.
+ */
+export async function settleBooking(
+  sql: Db,
+  ledger: BookingLedger,
+  input: CloseInput,
+): Promise<Booking> {
+  return closeBooking(sql, ledger, input, 'settled')
+}
+
+/**
+ * Cancel a booking: the hour will not happen, so the hold is released and nothing is paid.
+ *
+ * The mirror of `settleBooking` and deliberately the same code path — see `closeBooking`.
+ */
+export async function cancelBooking(
+  sql: Db,
+  ledger: BookingLedger,
+  input: CloseInput,
+): Promise<Booking> {
+  return closeBooking(sql, ledger, input, 'cancelled')
+}
+
+/**
+ * The only way a booking leaves `open`, and the reason there is only one.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE RELEASE IS UNCONDITIONAL AND COMES FIRST, WHICHEVER TERMINAL STATE THIS IS.
+ *
+ * `settled` and `cancelled` differ in exactly one step — whether the fee then moves to the owner —
+ * and they are one function because the step they SHARE is the one that must never be forgotten.
+ * Two functions would be two places to leave the release out of, and leaving it out is precisely
+ * the defect this repairs: EMBER posted to `reserved` by `reservePostings` with no path back, on a
+ * table whose `status` column has admitted `settled` and `cancelled` since migration 6 while no
+ * statement in this service ever wrote either.
+ *
+ * The database is the belt to this brace. `bookings_terminal_frees_the_money` (migration 14) is
+ * `check (status = 'open' or released_entry_id is not null)`, so a terminal booking that did not
+ * release has no representation — a future function that forgot this one exists cannot write the
+ * row at all.
+ *
+ * ── WHY THE LEDGER CALLS ARE INSIDE THE TRANSACTION, HOLDING A ROW LOCK ──────────────────────
+ *
+ * Normally they would not be: `grantEngagement` posts first and records after, and the header of
+ * this file explains why that ordering is right for a grant. A close is the case where it is
+ * wrong, and the difference is that a close has TWO outcomes.
+ *
+ * With the ledger calls outside, a settle and a cancel racing on one booking both release (fine,
+ * idempotent, same entry), then the settle posts the fee and the cancel wins the row — leaving a
+ * booking marked `cancelled` whose booker has paid. There is no idempotency key that prevents
+ * that, because the two requests are genuinely different requests.
+ *
+ * `select … for update` on the booking makes the second closer wait, see a status that is no
+ * longer `open`, and answer `already_closed`. The lock is held across two HTTP calls to one
+ * service, and the only thing that can contend for it is another close of the SAME booking, which
+ * is exactly what must wait. A crash mid-way rolls the row back and leaves ledger entries that
+ * were posted under keys derived from the booking id, so the retry replays them and converges —
+ * the safe direction, and the same one the grant path takes.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function closeBooking(
+  sql: Db,
+  ledger: BookingLedger,
+  input: CloseInput,
+  outcome: Exclude<BookingStatus, 'open'>,
+): Promise<Booking> {
+  return sql.begin(async (tx) => {
+    const rows = await tx<BookingRow[]>`
+      select ${tx.unsafe(BOOKING_COLUMNS)}
+        from bookings b join parcels p on p.id = b.parcel_id
+       where b.id = ${input.bookingId} for update of b
+    `
+    const row = rows[0]
+    if (!row) throw new WorldError('not_found', 'no such booking', 404)
+    const booking = toBooking(row)
+    if (booking.status !== 'open') {
+      throw new WorldError('already_closed', `that booking is already ${booking.status}`, 409)
+    }
+    if (!booking.reservationId) {
+      // Unreachable through `bookVenue`, and `bookings_open_holds_money` says so at the database.
+      // Named rather than assumed, because the alternative to a named refusal here is a `null`
+      // reaching the ledger's url builder and a 404 that says nothing about money.
+      throw new WorldError('no_hold', 'an open booking without a hold cannot be closed', 409)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // KEYS DERIVED FROM THE BOOKING, NOT FROM THE REQUEST.
+    //
+    // A retry — this service's, a client's, a job's — must replay rather than repeat. The ledger
+    // stores the key per route (`withIdempotency`, `ledger/src/entries.ts:1003`), and a replay
+    // returns the SAME entry id, which is what lets `released_entry_id` be recorded truthfully by
+    // whichever attempt finally commits. A per-request key would release once and then 409
+    // `already_released` for ever, stranding the booking open with no way to record who freed it.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    const released = await ledger.release(booking.reservationId, {
+      actor: input.actor,
+      correlationId: input.correlationId,
+      idempotencyKey: `tessera:booking:${booking.id}:release`,
+      description: `Release the hold on booking ${booking.id}`,
+    })
+
+    const settled =
+      outcome === 'settled'
+        ? await ledger.payBookingFee({
+            bookerSubject: booking.bookedBy,
+            ownerSubject: booking.ownerSubject,
+            amountWei: booking.priceWei,
+            bookingId: booking.id,
+            parcelId: booking.parcelId,
+            actor: input.actor,
+            correlationId: input.correlationId,
+            idempotencyKey: `tessera:booking:${booking.id}:fee`,
+          })
+        : null
+
+    const closed = await tx<BookingRow[]>`
+      update bookings b
+         set status            = ${outcome},
+             released_entry_id = ${released.id},
+             settled_entry_id  = ${settled?.id ?? null},
+             closed_at         = now()
+        from parcels p
+       where b.id = ${booking.id} and p.id = b.parcel_id and b.status = 'open'
+      returning ${tx.unsafe(BOOKING_COLUMNS)}
+    `
+    const after = closed[0]
+    // The `for update` above means nothing can have moved it, so this is the database disagreeing
+    // with itself rather than a race. Loud, and never a silent success.
+    if (!after) throw new WorldError('not_closed', 'the booking did not close', 500)
+    return toBooking(after)
+  }) as Promise<Booking>
 }
 
 /* ------------------------------------------------------------------------ engagement grants */

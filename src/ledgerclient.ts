@@ -37,13 +37,48 @@ import {
   type AccountSubject,
   type AccountType,
   type Actor,
+  type EntryKind,
   type LedgerAssetCode,
   type Posting,
   type TokenAssetCode,
 } from '@cloudsforge/contracts-money'
+import type { LiveScope } from '@cloudsforge/contracts-auth'
 import { ASSET } from './sparks.ts'
 import { GRANT_ENTRY_KIND, AVAILABLE, PAYOUT_DUE } from './economy.ts'
 import { SERVICE } from './env.ts'
+
+/**
+ * The scopes this module's credential must carry, declared here so the deploy can mint exactly
+ * these — the convention `community/src/index.ts:130` states and twenty repositories follow, and
+ * the one `deploy/scripts/derive-grants.mjs` actually reads.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * `ledger:reserve` IS NEW HERE, AND IT IS THE THIRD OF THE THREE THINGS THAT WERE MISSING.
+ *
+ * `deploy/compose/estate/grant-gaps.json` granted this file `ledger:post` alone and said why:
+ * "Derived by reading the single call site: POST /entries. **It reaches no other ledger route.**"
+ * That was true, and it stopped being true the moment `reserve` and `release` below were written —
+ * both are gated on `RESERVE_SCOPE = 'ledger:reserve'` (`ledger/src/server.ts:80`, demanded at
+ * `:449` and `:488`). The grant was never external and never anyone else's to open: it is
+ * computed from this repository's own source, and this constant is that source.
+ *
+ * That same gaps entry ends "This entry deletes itself the day micro-tessera exports
+ * LEDGER_SCOPES". This is that day — `derive-grants.mjs` fails a gaps entry whose module has since
+ * grown a declaration, deliberately, "so the file shrinks as the repositories that own those
+ * modules fix them". Deleting it is `micro-deploy`'s edit to make, not this repository's.
+ *
+ * `LiveScope` rather than `string`: identity validates every granted name against
+ * `@cloudsforge/contracts-auth` at import and refuses to boot on one it does not have, so a typo
+ * here is not one failed call, it is no token minting for the whole estate.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export const LEDGER_SCOPES: readonly LiveScope[] = Object.freeze([
+  // `POST /entries` — engagement grants, and the booking fee that pays a Venue's owner.
+  'ledger:post',
+  // `POST /reservations` and `POST /reservations/:id/release` — the escrowed hold behind a
+  // booking, and the release without which a terminal booking would strand it.
+  'ledger:reserve',
+])
 
 /**
  * The wire form of an account. Four fields, all of which the ledger keys or checks on.
@@ -105,14 +140,83 @@ export interface PostEntryRequest {
   readonly metadata?: Readonly<Record<string, string | number | boolean | null>>
 }
 
+/** Raised when the ledger says this reservation has already been reversed. 409, never retried. */
+export class AlreadyReleasedError extends LedgerError {
+  constructor(message: string) {
+    super('hold_already_released', message, 409)
+    this.name = 'AlreadyReleasedError'
+  }
+}
+
+export interface ReserveRequest {
+  /** Whose money. `user:<uuid>` — both legs are this subject's own liability accounts. */
+  readonly subject: string
+  readonly amountWei: bigint
+  readonly actor: Actor
+  readonly correlationId: string
+  readonly idempotencyKey: string
+  readonly description?: string
+}
+
+export interface ReleaseRequest {
+  readonly actor: Actor
+  readonly correlationId: string
+  readonly idempotencyKey: string
+  readonly description?: string
+}
+
+export interface BookingFeeRequest {
+  readonly bookerSubject: string
+  readonly ownerSubject: string
+  readonly amountWei: bigint
+  readonly bookingId: string
+  readonly parcelId: string
+  readonly actor: Actor
+  readonly correlationId: string
+  readonly idempotencyKey: string
+}
+
+/**
+ * The entry kind a settled booking posts under.
+ *
+ * `transfer`, from the ledger's own closed set: this is one player's money becoming another
+ * player's money and nothing else. Not `treasury_spend` — that is `GRANT_ENTRY_KIND`, and it means
+ * the world paid, which would make every settled booking look like an engagement grant in the
+ * reports 21-engagement-treasury.md is built on.
+ */
+export const BOOKING_FEE_ENTRY_KIND: EntryKind = 'transfer'
+
 export interface LedgerClient {
   postEntry(request: PostEntryRequest): Promise<{ id: string; replayed: boolean }>
+  /**
+   * Move a booker's fee from `available` to `reserved` and hand back the hold's id.
+   *
+   * **The reservation IS the entry** (`ledger/src/server.ts:519`): there is no separate
+   * reservations table to fall out of step with the journal, so the id stored in
+   * `bookings.reservation_id` is a journal entry id and "does this hold exist" is answered by the
+   * rows that prove the money moved.
+   */
+  reserve(request: ReserveRequest): Promise<{ reservationId: string; replayed: boolean }>
+  /**
+   * Return a hold to `available`. **Full release only** — the ledger declines to model a partial
+   * one (`ledger/src/entries.ts:985`) and a booking never needs one, because a booking's price is
+   * a single number the schema pins to the owner's posted rate.
+   */
+  release(reservationId: string, request: ReleaseRequest): Promise<{ id: string; replayed: boolean }>
+  /**
+   * Pay a settled booking's fee from the booker to the Venue's owner.
+   *
+   * A method rather than postings the caller assembles, so `economy.ts` can name the ledger it
+   * needs with a `type`-only import and the two files stay out of a runtime cycle. See
+   * `bookingFeePostings` at the foot of this file for what it is and what it deliberately is not.
+   */
+  payBookingFee(request: BookingFeeRequest): Promise<{ id: string; replayed: boolean }>
   balances(subject: string): Promise<ReadonlyArray<{ purpose: string; amount: bigint }>>
 }
 
 export interface LedgerClientOptions {
   readonly baseUrl: string
-  /** A live service token holding `ledger:post`. A function, because a token expires. */
+  /** A live service token holding `LEDGER_SCOPES`. A function, because a token expires. */
   readonly token: () => Promise<string>
   /** Test seam. */
   readonly client?: Pick<HttpClient, 'request'>
@@ -149,7 +253,7 @@ export function balanceCheck(postings: readonly PostingRequest[]): void {
 export function createLedgerClient(options: LedgerClientOptions): LedgerClient {
   const http = options.client ?? new HttpClient({ baseUrl: options.baseUrl, name: 'ledger' })
 
-  return {
+  const client: LedgerClient = {
     async postEntry(request) {
       balanceCheck(request.postings)
       try {
@@ -193,6 +297,83 @@ export function createLedgerClient(options: LedgerClientOptions): LedgerClient {
       }
     },
 
+    async reserve(request) {
+      try {
+        const body = await http.request<{
+          reservationId?: string
+          entry?: { id?: string }
+          replayed?: boolean
+        }>('/reservations', {
+          method: 'POST',
+          deadlineMs: 10_000,
+          idempotencyKey: request.idempotencyKey,
+          requestId: request.correlationId,
+          headers: { authorization: `Bearer ${await options.token()}` },
+          body: {
+            subject: request.subject,
+            assetCode: ASSET,
+            // A decimal STRING for the same reason every other amount on this wire is one.
+            amount: request.amountWei.toString(),
+            originatingService: SERVICE,
+            actor: request.actor,
+            correlationId: request.correlationId,
+            idempotencyKey: request.idempotencyKey,
+            ...(request.description !== undefined ? { description: request.description } : {}),
+          },
+        })
+        const reservationId = body.reservationId ?? body.entry?.id
+        if (!reservationId) throw new LedgerError('bad_response', 'the ledger returned no reservation id')
+        return { reservationId, replayed: body.replayed ?? false }
+      } catch (err) {
+        throw translate(err)
+      }
+    },
+
+    async release(reservationId, request) {
+      try {
+        const body = await http.request<{ entry?: { id?: string }; id?: string; replayed?: boolean }>(
+          `/reservations/${encodeURIComponent(reservationId)}/release`,
+          {
+            method: 'POST',
+            deadlineMs: 10_000,
+            idempotencyKey: request.idempotencyKey,
+            requestId: request.correlationId,
+            headers: { authorization: `Bearer ${await options.token()}` },
+            body: {
+              originatingService: SERVICE,
+              actor: request.actor,
+              correlationId: request.correlationId,
+              idempotencyKey: request.idempotencyKey,
+              ...(request.description !== undefined ? { description: request.description } : {}),
+            },
+          },
+        )
+        const id = body.entry?.id ?? body.id
+        if (!id) throw new LedgerError('bad_response', 'the ledger returned no release entry id')
+        return { id, replayed: body.replayed ?? false }
+      } catch (err) {
+        throw translate(err)
+      }
+    },
+
+    // `client.postEntry`, not `this.postEntry`: a caller that destructures the client — which
+    // `BookingLedger`'s `Pick` invites — would otherwise get an unbound method and a TypeError at
+    // the one moment money is meant to move.
+    async payBookingFee(request) {
+      return client.postEntry({
+        kind: BOOKING_FEE_ENTRY_KIND,
+        actor: request.actor,
+        correlationId: request.correlationId,
+        idempotencyKey: request.idempotencyKey,
+        postings: bookingFeePostings(request.bookerSubject, request.ownerSubject, request.amountWei),
+        metadata: {
+          programme: SERVICE,
+          bookingId: request.bookingId,
+          parcelId: request.parcelId,
+        },
+      })
+    },
+
     async balances(subject) {
       try {
         const response = await http.request<{ balances?: unknown }>(
@@ -222,6 +403,8 @@ export function createLedgerClient(options: LedgerClientOptions): LedgerClient {
       }
     },
   }
+
+  return client
 }
 
 /**
@@ -246,8 +429,49 @@ function translate(err: unknown): Error {
         'look (23-tessera.md §8.3).',
     )
   }
+  // The ledger's own sentence, `ledger/src/entries.ts:1017`. Matched rather than inferred from the
+  // 409, because "already released" is the ONE release failure that is not a reason to retry: the
+  // money has already left `reserved`, and a caller told to try again would loop on a fact.
+  if (message.includes('was already released by entry')) {
+    return new AlreadyReleasedError(
+      `the ledger has already reversed this hold: ${message}. The money is not stranded — it is ` +
+        'back in the booker\'s `available` — but this service did not do it and cannot record ' +
+        'which entry did, so the booking stays open for a person to look at.',
+    )
+  }
   if (err instanceof LedgerError) return err
   return new LedgerError('ledger_unavailable', message)
+}
+
+/**
+ * The two postings that pay a Venue's owner when a booking settles.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * THIS IS NOT THE `releasePayout` THE FILE BELOW REFUSES TO HAVE, AND THE DIFFERENCE IS WHOSE
+ * MONEY IT IS.
+ *
+ * That function moved a creator's `payout_due` → `available` for a MARKET SALE, which
+ * `market/src/orders.ts:696` already does — two services releasing one payout. A venue booking
+ * never reaches micro-market: no listing, no order, no settlement, nobody else to double it. §8.4
+ * lists it in its own right — "Earned: object sales, royalties on every resale, **venue
+ * bookings**, and commissions" — and Tessera is the only service that holds a calendar.
+ *
+ * `available` → `available`, not into `payout_due`: the dispute window `payout_due` exists for is
+ * a property of a SALE with a return path. An hour of a room, already sat through by the time this
+ * runs, has none — and money parked in `payout_due` with nothing in this service that ever debits
+ * it would be money the owner can see and never spend, which is the stranding this whole change
+ * exists to end, moved one account along.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export function bookingFeePostings(
+  bookerSubject: string,
+  ownerSubject: string,
+  amountWei: bigint,
+): readonly PostingRequest[] {
+  return [
+    { account: holder(bookerSubject, 'available'), direction: 'debit', amount: amountWei, assetCode: ASSET, sequence: 0 },
+    { account: holder(ownerSubject, 'available'), direction: 'credit', amount: amountWei, assetCode: ASSET, sequence: 1 },
+  ]
 }
 
 /* -------------------------------------------------------------------------- account shapes */

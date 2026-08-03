@@ -229,6 +229,12 @@ const server = createServer({
   // The wallet strip. Bound whenever a LEDGER is configured, independently of market: a player's
   // balances are worth showing in a world that cannot yet sell anything.
   ...(ledger ? { wallet: (subject: string) => walletOf(ledger, subject) } : {}),
+  // The Venue calendar's escrow, bound on the same condition and for the same reason the wallet
+  // is: booking has nothing to do with micro-market. The client IS the seam — reserve, release
+  // and the fee are three of its methods, and there is no adapter here because there is nothing
+  // for one to adapt. Without a ledger the three booking routes answer 503, which is the honest
+  // answer for a hold nobody can take.
+  ...(ledger ? { escrow: ledger } : {}),
   ...(community
     ? {
         governance: {

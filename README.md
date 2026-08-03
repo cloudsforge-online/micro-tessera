@@ -53,7 +53,15 @@ an operator with a psql prompt, and every one of those has happened in this esta
 | An on-chain listing | CHECK | 6 |
 | A fee that differs between two accounts | trigger against a singleton terms row | 6 |
 | Two open bookings for one slot | partial unique index | 6 |
+| **Two open bookings OVERLAPPING on one parcel** | **GiST exclusion constraint** | **14** |
 | A booking with no escrow hold | CHECK | 6 |
+| **A Venue that has posted no rate** | **CHECK** | **14** |
+| **A venue rate of zero, so a free hold** | **CHECK** | **14** |
+| **A booking priced at anything but the owner's rate** | **BEFORE INSERT trigger** | **14** |
+| **A booking of your own Venue** | **BEFORE INSERT trigger** | **14** |
+| **A settled or cancelled booking that did not release its hold** | **CHECK** | **14** |
+| **A settled booking that paid the owner nothing** | **CHECK** | **14** |
+| **Re-pricing, re-timing or re-opening a booking** | **BEFORE UPDATE trigger** | **14** |
 | A grant with no ledger entry behind it | NOT NULL | 6 |
 | Synthetic footfall | CHECK | 7 |
 | More than 60 avatars in a ward instance | deferred constraint trigger | 7 |
@@ -117,6 +125,48 @@ because its final stage copied `/runtime` but not `/contracts`, past a `link:` s
 entrypoint imported, and CI hid it by reading the image's metadata without ever running it. This
 Dockerfile is aetherholm's, which carries both.
 
+## Venue bookings
+
+This section exists because the feature was **recorded as unfixed** in the estate's topic
+reconciliation and because the record was right to hold the emitter back: `tessera.venue.booked`
+had a producer on paper and none in the running service, and wiring it up first would have shipped
+a free hold and a money trap. Migration 14 and `economy.ts` are the repair, and the reasoning lives
+in the migration rather than here — this is the index.
+
+* **Who prices a slot: the OWNER, posted on the parcel, in advance.** `parcels.venue_rate_wei`,
+  per hour, and **a Venue is a parcel that has posted a rate** —
+  `tessera_a_venue_posts_a_rate` refuses `is_venue` with no rate, `tessera_venue_rate_is_positive`
+  refuses a rate of zero, and the venue trigger refuses a booking priced at anything other than
+  `venue_rate_wei * hours`. A zero-price hold on somebody else's calendar is now unrepresentable
+  rather than merely refused: there is no arithmetic over those three rules that reaches one.
+  Not the platform, because a booking fee is not a take (§7.2's fifth refusal is about the fee
+  and the royalty cap, and a platform-set rate would be the platform pricing a player's land);
+  not the booker, because an offer needs a state between "asked" and "held" that
+  `bookings_status_known` does not have. `PUT /v1/parcels/:id/venue`.
+* **A booking is a SPAN, and overlap is a GiST exclusion constraint.** 1–12 whole hours, and
+  `tessera_no_overlapping_bookings` is the rule the partial unique index on `(parcel_id, slot)`
+  only ever was a fraction of — 14:00 for three hours and 15:00 for one are different keys and
+  the same room. Half-open `[)`, so back-to-back is not overlapping, which is
+  `tessera_parcels_do_not_overlap`'s argument applied to time.
+* **The other two thirds of the lifecycle exist, and money cannot be stranded.**
+  `settleBooking` and `cancelBooking` are one function (`closeBooking`) because the step they
+  share — releasing the hold through `POST /reservations/:id/release` — is the one that must
+  never be forgotten, and `bookings_terminal_frees_the_money` is the database saying the same
+  thing: **a booking that is not `open` names the entry that gave the money back, or it does not
+  exist.** Settling then pays the owner (§8.4, "Earned: … venue bookings"); cancelling pays
+  nobody. `economy.test.ts` opens a booking, drives it to each terminal state, and asserts the
+  `reserved` balance is the price while open and **zero** after — at both ends, because the zero
+  alone would pass against a ledger that never reserved anything.
+* **`ledger:reserve` opened itself**, as `grant-gaps.json` said it would: this repository now
+  exports `LEDGER_SCOPES` from `ledgerclient.ts`, `micro-deploy`'s `derive-grants.mjs` reads it,
+  and the gaps entry for `tessera/src/ledgerclient.ts` is stale by that tool's own rule. Deleting
+  it is `micro-deploy`'s edit.
+
+`POST /v1/parcels/:id/bookings` reserves before it writes, because `bookings_open_holds_money`
+refuses an open booking that names no hold — and **releases the hold if the booking then fails**,
+because a reservation that outlives its booking is the same stranded EMBER arrived at from the
+other side.
+
 ## What is not built
 
 Phase 2 and beyond, stated so nobody looks for it:
@@ -125,38 +175,6 @@ Phase 2 and beyond, stated so nobody looks for it:
   exist and are tested; the Solidity contract, its deployment through `mint`, and the job that
   calls it do not. §9.3 gates v2 on two named changes in other repositories — a `user` signing
   purpose in `custody` and a log-query surface in `indexer` — and neither has landed.
-* **The venue booking route.** `bookVenue` (`src/economy.ts`) and `tessera.venue.booked` exist and
-  are tested against a real database; **nothing in the running service calls them, and this is
-  unfixed work rather than a decision.** It is deliberately NOT the `recordAnchor` case above:
-  that one waits on a Solidity contract nobody has written, whereas every dependency of this one
-  already exists — `micro-ledger` serves `POST /reservations` and `POST /reservations/:id/release`
-  (`ledger/src/server.ts:448`, `:487`), and `micro-notify` has a finished, unblocked rule for the
-  topic (`notify/src/catalogue.ts:1266`, template `templates.ts:467`, tests
-  `catalogue.test.ts:969`) resolving the recipient through the `ownerSubject` this emitter puts on
-  the payload. Nor is it the `transferParcel` case: no other service in the estate books a venue,
-  so there is no duplicate implementation to consolidate into.
-
-  What is missing is the rest of the feature, not a line of wiring:
-
-  * **A rate.** `parcels.is_venue` is a boolean and there is no rate column anywhere;
-    `BookInput.priceWei` is an unsourced input, and `price_wei >= 0` admits a zero-price booking.
-    Who sets the price of a slot is undecided, and a route cannot be written before it is.
-  * **The other two thirds of the lifecycle.** `bookings.status` is
-    `open | settled | cancelled` and only the `open` insert exists. A booking that can be opened
-    but never settled or cancelled strands a player's EMBER in `reserved` permanently — the
-    release half (`POST /reservations/:id/release`) is the part that makes the hold safe, and it
-    is the part with no code.
-  * **A `ledger:reserve` grant.** Tessera holds `ledger:post` only, and
-    `deploy/compose/estate/grant-gaps.json` derives that from the call sites that exist — "it
-    reaches no other ledger route". `POST /reservations` is gated on `RESERVE_SCOPE`
-    (`ledger/src/server.ts:80`). That block is real but **not external**: it is computed from this
-    repository's own source, so it opens by itself the day the call site is written.
-
-  The emitter is the first slice of that feature and it waits for the rest. The half that WOULD
-  have been a defect — an emitter whose payload no consumer had ever checked — is closed:
-  `economy.test.ts` exercises it against a real database and asserts the outbox row, and
-  `contracts.test.ts` pins `keyedBy` to `parcel_id`.
-
 * **Ward governance minting a `micro-community` community.** `wards.community_id` exists and
   `community.proposal.executed` is consumed and applied; nothing creates the community yet.
 * **Market and billing HTTP calls.** `draftListing` writes the Tessera half with its terms

@@ -1521,6 +1521,316 @@ export const MIGRATIONS: readonly Migration[] = [
         on objects (studio_generation_job_id) where studio_generation_job_id is not null;
     `,
   },
+
+  {
+    version: 14,
+    name: 'a_venue_posts_its_rate_and_a_booking_is_a_span',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- WHO PRICES A VENUE SLOT: THE OWNER, POSTED ON THE PARCEL, IN ADVANCE.
+      --
+      -- \`bookings.price_wei\` used to be whatever the caller inserted, held only by
+      -- \`tessera_booking_price_not_negative check (price_wei >= 0)\`. That is not a price, it is
+      -- an unsourced number, and \`>= 0\` admits the worst case of it: **a stranger could hold an
+      -- hour of somebody else's calendar for nothing** and the database would agree. Nobody had
+      -- decided who prices a slot, so no route could be written. This migration decides.
+      --
+      -- THREE CANDIDATES.
+      --
+      --   * **The platform, one rate for everybody.** That is the right shape for the FEE and the
+      --     ROYALTY CAP — §7.2's fifth refusal, "the take is the same for everybody", enforced as
+      --     \`listings_one_rate_for_everybody\` above. But a booking fee is not a take. It is one
+      --     player charging another for their own property, and a platform-set rate would be the
+      --     platform pricing a player's land. Refused for the same reason §7.1 refuses buying
+      --     discovery.
+      --   * **The booker, i.e. an offer.** That is a negotiation, and a negotiation needs a state
+      --     between "asked" and "held" plus an acceptance by the owner before any money moves.
+      --     \`bookings_status_known\` has no such state, and inventing one to avoid making this
+      --     decision would be the decision, made worse.
+      --   * **The owner, posted on the parcel, taken as-is.** This is the shape this repository
+      --     already has for the other thing a player sells: \`listings.price_wei\` is the SELLER's
+      --     number (migration 6), snapshotted at creation. It is one value, it is a FACT ABOUT
+      --     THE PARCEL rather than an argument to a route, and that is precisely what lets the
+      --     schema check it. Chosen.
+      --
+      -- So a Venue is not a boolean any more — **a Venue is a parcel that has posted a rate.**
+      -- \`is_venue = true\` with no rate is unrepresentable, the rate cannot be zero or negative,
+      -- and a booking's price must equal \`venue_rate_wei * hours\` exactly. There is no
+      -- arithmetic over those three rules that reaches a free hold, which is what makes the
+      -- zero-price hold UNREPRESENTABLE rather than merely refused by a handler somebody can
+      -- forget to call.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      alter table parcels add column if not exists venue_rate_wei numeric(78,0);
+
+      -- A parcel flagged a Venue before rates existed has no rate and cannot be given one here:
+      -- inventing a number would be this migration pricing a player's land, which is exactly what
+      -- the decision above refuses. Un-flagging is the honest repair and it is reversible by the
+      -- owner in one PATCH, now carrying the rate they choose. Verified against the live estate
+      -- before writing this: \`select count(*) filter (where is_venue) from parcels\` was 0 of 29,
+      -- and \`bookings\` was empty, so this rewrites nothing that exists.
+      update parcels set is_venue = false where is_venue and venue_rate_wei is null;
+
+      do $$ begin
+        alter table parcels add constraint tessera_venue_rate_is_positive
+          check (venue_rate_wei is null or venue_rate_wei > 0);
+      exception when duplicate_object then null; end $$;
+
+      do $$ begin
+        alter table parcels add constraint tessera_venue_rate_whole_sparks
+          check (venue_rate_wei is null or venue_rate_wei % ${WEI_PER_SPARK_SQL} = 0);
+      exception when duplicate_object then null; end $$;
+
+      -- The one that carries the guarantee. \`is_venue\` implies a rate; the rate implies > 0.
+      do $$ begin
+        alter table parcels add constraint tessera_a_venue_posts_a_rate
+          check (not is_venue or venue_rate_wei is not null);
+      exception when duplicate_object then null; end $$;
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- AND THE TERMS GO WHEN THE FLAG GOES, FOR EVERY WRITER RATHER THAN FOR ONE OF THEM.
+      --
+      -- The CHECK above is one-directional: it refuses a Venue with no rate and says nothing
+      -- about a rate with no Venue. That leftover is harmless right up until somebody re-flags
+      -- the parcel a year later and is charged last year's number without being asked — the same
+      -- family as a stale snapshot, and the reason listings snapshot their terms per listing.
+      --
+      -- A trigger rather than a line in \`setParcelFlags\`, because \`world.ts\` is forbidden by
+      -- §12's test 4 to name money at all (it may not even import \`sparks.ts\`), and because a
+      -- rule enforced by one function is a rule the next function does not have.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create or replace function tessera_venue_terms_follow_the_flag() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if not new.is_venue then
+          new.venue_rate_wei := null;
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists parcels_venue_terms_follow_the_flag on parcels;
+      create trigger parcels_venue_terms_follow_the_flag
+        before insert or update on parcels
+        for each row execute function tessera_venue_terms_follow_the_flag();
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- A BOOKING IS A SPAN OF A CALENDAR, NOT AN INSTANT — AND OVERLAP IS THE REAL QUESTION.
+      --
+      -- \`tessera_one_open_booking\` is a partial unique index on \`(parcel_id, slot)\`, and while
+      -- every booking was exactly one hour long that WAS the whole rule: two one-hour bookings on
+      -- the hour either start at the same instant or do not touch. §11.6 names that index and it
+      -- stays.
+      --
+      -- But an event is rarely an hour, and the moment a booking can run three hours the unique
+      -- index stops being the rule and starts being a fraction of it: 14:00 for three hours and
+      -- 15:00 for one hour are DIFFERENT keys and the same room at the same time. That is the
+      -- shape \`tessera_parcels_do_not_overlap\` (migration 4) already solved for ground, with the
+      -- same instrument — a GiST exclusion constraint takes a predicate lock on the range, so the
+      -- loser of a concurrent insert gets 23P01 rather than a second overlapping hold.
+      --
+      -- Half-open \`[)\` for the same reason the parcel ranges are: 14:00–15:00 and 15:00–16:00 are
+      -- back to back, not overlapping, and a calendar that refused those would waste half a day.
+      --
+      -- \`during\` is maintained by a trigger rather than \`generated always as\`, and that is
+      -- Postgres's rule rather than a preference: \`timestamptz + interval\` is STABLE (it depends
+      -- on TimeZone), so the generated form is rejected outright —
+      -- \`ERROR: generation expression is not immutable\`. The trigger overwrites it on every
+      -- insert and every update, so it is derived in fact even though it is not derived in name,
+      -- and \`bookings_terms_are_written_once\` below forbids the inputs changing under it.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      alter table bookings add column if not exists hours  integer not null default 1;
+      alter table bookings add column if not exists during tstzrange;
+
+      do $$ begin
+        alter table bookings add constraint bookings_hours_are_a_working_day
+          check (hours >= 1 and hours <= 12);
+      exception when duplicate_object then null; end $$;
+
+      create or replace function tessera_booking_span() returns trigger
+        language plpgsql
+      as $$
+      begin
+        new.during := tstzrange(new.slot, new.slot + make_interval(hours => new.hours), '[)');
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists bookings_carry_their_span on bookings;
+      create trigger bookings_carry_their_span
+        before insert or update on bookings
+        for each row execute function tessera_booking_span();
+
+      update bookings
+         set during = tstzrange(slot, slot + make_interval(hours => hours), '[)')
+       where during is null;
+
+      alter table bookings alter column during set not null;
+
+      do $$ begin
+        alter table bookings add constraint tessera_no_overlapping_bookings
+          exclude using gist (parcel_id with =, during with &&) where (status = 'open');
+      exception when duplicate_object then null; end $$;
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- THE PRICE IS POSITIVE, IN THE SCHEMA, WITH NO TRIGGER IN THE WAY.
+      --
+      -- Two layers, deliberately. This CHECK is the one that cannot be routed around — it is
+      -- validated on every insert and every update, by a superuser at a psql prompt as much as by
+      -- this service — and it replaces \`>= 0\` rather than sitting beside it, because a
+      -- \`price_wei >= 0\` that can never fail while \`price_wei > 0\` holds is exactly the
+      -- "check that cannot fail" this estate keeps finding.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      alter table bookings drop constraint if exists tessera_booking_price_not_negative;
+
+      do $$ begin
+        alter table bookings add constraint tessera_booking_price_is_positive
+          check (price_wei > 0);
+      exception when duplicate_object then null; end $$;
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- ...AND IT IS THE OWNER'S POSTED RATE, TO THE WEI. The second layer, and the one that says
+      -- WHOSE number it is.
+      --
+      -- Folded into the existing venue trigger rather than added beside it, because it needs the
+      -- same \`parcels\` row that trigger already reads and two triggers reading one row to answer
+      -- one question is how they drift. INSERT only: the rate is snapshotted onto the booking the
+      -- way \`listings\` snapshots its terms (§7.2, "checkable per order rather than promised in a
+      -- document"), so an owner raising their rate tomorrow does not retroactively reprice a hold
+      -- taken today — and does not make an already-open booking unsettleable.
+      --
+      -- The self-booking refusal is here for the same reason: the owner is read from the same row.
+      -- A booking of your own Venue would escrow your money against yourself, pay it back to
+      -- yourself on settlement, and tell you by notification that a stranger had taken your
+      -- calendar. It is a no-op with three side effects.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create or replace function tessera_assert_booking_is_a_venue() returns trigger
+        language plpgsql
+      as $$
+      declare
+        p record;
+      begin
+        select id, is_venue, status, owner_subject, venue_rate_wei
+          into p from parcels where id = new.parcel_id;
+        if p is null then
+          raise exception 'no parcel %', new.parcel_id using errcode = 'foreign_key_violation';
+        end if;
+        if not p.is_venue then
+          raise exception
+            'parcel % is not a Venue — only a Venue has a bookable calendar (23-tessera.md §6.4)', p.id
+            using errcode = 'check_violation';
+        end if;
+        if p.status <> 'held' then
+          raise exception 'parcel % is % — a released parcel has no calendar', p.id, p.status
+            using errcode = 'check_violation';
+        end if;
+        if p.venue_rate_wei is null then
+          raise exception
+            'parcel % posts no venue rate — bookings_price_is_the_owners_rate', p.id
+            using errcode = 'check_violation';
+        end if;
+        if new.price_wei <> p.venue_rate_wei * new.hours then
+          raise exception
+            'booking on parcel % is priced % for % hour(s) but the owner posts % per hour — bookings_price_is_the_owners_rate',
+            p.id, new.price_wei, new.hours, p.venue_rate_wei
+            using errcode = 'check_violation';
+        end if;
+        if new.booked_by = p.owner_subject then
+          raise exception
+            'parcel % is booked by its own owner — bookings_are_not_your_own_venue', p.id
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- THE OTHER TWO THIRDS OF THE LIFECYCLE, AND THE CONSTRAINT THAT MAKES STRANDED MONEY
+      -- UNREPRESENTABLE.
+      --
+      -- \`bookings_status_known\` has admitted \`open | settled | cancelled\` since migration 6 and
+      -- only the \`open\` insert has ever existed. A booking that could be opened and never closed
+      -- strands the booker's EMBER in \`reserved\` — the account \`reservePostings\`
+      -- (\`ledgerclient.ts\`) posts it to — permanently, with no path out. That is the reason the
+      -- emitter was held back, and this is the half of the repair that lives in the database.
+      --
+      -- \`bookings_open_holds_money\` says an OPEN booking names a reservation. This is the same
+      -- sentence from the other end: **a booking that is no longer open names the ledger entry
+      -- that gave the money back.** Neither is a guard a service applies; both are conditions a
+      -- row must satisfy to exist. You cannot mark a booking settled or cancelled without having
+      -- already released the hold, so "terminal but still holding the money" has no
+      -- representation to be in.
+      --
+      -- \`settled\` carries a second id, because settling does two things and only one of them is
+      -- the release: the fee then moves from the booker to the OWNER (§8.4, "Earned: object
+      -- sales, royalties on every resale, **venue bookings**, and commissions"). A settled
+      -- booking that named no payment would be a slot the owner hosted for free.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      alter table bookings add column if not exists released_entry_id text;
+      alter table bookings add column if not exists settled_entry_id  text;
+      alter table bookings add column if not exists closed_at         timestamptz;
+
+      do $$ begin
+        alter table bookings add constraint bookings_terminal_frees_the_money
+          check (status = 'open' or released_entry_id is not null);
+      exception when duplicate_object then null; end $$;
+
+      do $$ begin
+        alter table bookings add constraint bookings_settled_pays_the_owner
+          check (status <> 'settled' or settled_entry_id is not null);
+      exception when duplicate_object then null; end $$;
+
+      -- An open booking has not closed, and a closed one has a date. Stated as an equivalence so
+      -- neither half can be written without the other.
+      do $$ begin
+        alter table bookings add constraint bookings_terminal_is_dated
+          check ((status = 'open') = (closed_at is null));
+      exception when duplicate_object then null; end $$;
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- WRITTEN ONCE, AND ONE WAY.
+      --
+      -- The price check above is INSERT-only, so without this an UPDATE could rewrite an agreed
+      -- price to any other positive number after the fact, and the "the booker cannot name a
+      -- price" guarantee would last exactly one statement. The same argument covers the parcel,
+      -- the span, the booker and the reservation: every one of them is a term of the agreement,
+      -- and a term you can edit afterwards is not a term.
+      --
+      -- The status half is what stops a settled booking being settled again — a second release of
+      -- a reservation the ledger has already reversed, or a second fee posting — and what stops a
+      -- terminal booking being re-opened onto a calendar somebody else has since filled.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create or replace function tessera_assert_booking_terms_unchanged() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if new.parcel_id      is distinct from old.parcel_id
+        or new.slot           is distinct from old.slot
+        or new.hours          is distinct from old.hours
+        or new.booked_by      is distinct from old.booked_by
+        or new.price_wei      is distinct from old.price_wei
+        or new.reservation_id is distinct from old.reservation_id then
+          raise exception
+            'booking % is written once — its parcel, span, booker, price and hold do not change (bookings_terms_are_written_once)',
+            old.id
+            using errcode = 'check_violation';
+        end if;
+        if old.status <> 'open' and new.status is distinct from old.status then
+          raise exception
+            'booking % is already % — a closed booking does not move again (bookings_terms_are_written_once)',
+            old.id, old.status
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists bookings_terms_are_written_once on bookings;
+      create trigger bookings_terms_are_written_once
+        before update on bookings
+        for each row execute function tessera_assert_booking_terms_unchanged();
+    `,
+  },
 ]
 
 /**

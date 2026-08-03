@@ -100,6 +100,13 @@ export interface Parcel {
   /** GENERATED in the database. There is no statement that can raise it. §6.2. */
   readonly objectCap: number
   readonly status: 'held' | 'released'
+  /**
+   * **A Venue is a parcel that has posted a rate**, and the rate itself is deliberately not on
+   * this type. What an hour costs is money, and §12's test 4 asserts as an ABSENCE that this
+   * module can neither name nor reach money — it may not so much as import `sparks.ts`. So the
+   * flag lives here and its terms live in `economy.ts` (`venueOf`), which is the division the
+   * guard was always asking for and which a rate column here would have quietly ended.
+   */
   readonly isVenue: boolean
   readonly isWorkshop: boolean
   readonly gateOpen: boolean
@@ -844,25 +851,53 @@ export async function resolveContest(
   }
 }
 
-/** Flag a parcel a Venue, a Workshop, or open its gate. §6.4's six kinds of space. */
+/**
+ * Flag a parcel a Workshop, open its gate, or STOP it being a Venue. §6.4's six kinds of space.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * `isVenue: true` IS REFUSED HERE, AND THE REFUSAL IS THE FEATURE.
+ *
+ * A Venue is a parcel that has posted what an hour of it costs — `tessera_a_venue_posts_a_rate`
+ * (migration 14) makes the flag without the terms unrepresentable — so opening one is not a flag
+ * flip and cannot be done from a module that §12's test 4 forbids to reach money at all. It is
+ * `PUT /v1/parcels/:id/venue`, over `economy.ts`. This function answers `no_venue_rate` rather
+ * than letting the constraint escape as a 500.
+ *
+ * Clearing the flag still works here, and the terms go with it: a database trigger nulls them on
+ * the same statement, so a rate for something nobody can book cannot be left behind by ANY writer
+ * rather than only by this one.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
 export async function setParcelFlags(
   sql: Db,
   parcelId: string,
   ownerSubject: string,
   flags: { isVenue?: boolean; isWorkshop?: boolean; gateOpen?: boolean },
 ): Promise<Parcel> {
-  const rows = await sql<ParcelRow[]>`
-    update parcels
-       set is_venue = coalesce(${flags.isVenue ?? null}, is_venue),
-           is_workshop = coalesce(${flags.isWorkshop ?? null}, is_workshop),
-           gate_open = coalesce(${flags.gateOpen ?? null}, gate_open),
-           last_edit_at = now()
-     where id = ${parcelId} and owner_subject = ${ownerSubject} and status = 'held'
-    returning ${sql.unsafe(PARCEL_COLUMNS)}
-  `
-  const row = rows[0]
-  if (!row) throw new WorldError('not_found', 'no such parcel, or it is not yours', 404)
-  return toParcel(row, new Date())
+  try {
+    const rows = await sql<ParcelRow[]>`
+      update parcels
+         set is_venue = coalesce(${flags.isVenue ?? null}, is_venue),
+             is_workshop = coalesce(${flags.isWorkshop ?? null}, is_workshop),
+             gate_open = coalesce(${flags.gateOpen ?? null}, gate_open),
+             last_edit_at = now()
+       where id = ${parcelId} and owner_subject = ${ownerSubject} and status = 'held'
+      returning ${sql.unsafe(PARCEL_COLUMNS)}
+    `
+    const row = rows[0]
+    if (!row) throw new WorldError('not_found', 'no such parcel, or it is not yours', 404)
+    return toParcel(row, new Date())
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (message.includes('tessera_a_venue_posts_a_rate')) {
+      throw new WorldError(
+        'no_venue_rate',
+        'a Venue posts what an hour of it costs — open one at PUT /v1/parcels/:id/venue',
+        400,
+      )
+    }
+    throw err
+  }
 }
 
 export type { Emit }

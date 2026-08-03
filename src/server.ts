@@ -79,18 +79,28 @@ import {
   type Footprint,
 } from './kiln.ts'
 import {
+  bookVenue,
+  cancelBooking,
   draftListing,
+  findBooking,
   findListing,
+  listBookingsOf,
   listListingsOf,
+  openVenue,
   platformTerms,
+  settleBooking,
+  venueOf,
   type ActivateListingInput,
+  type Booking,
+  type BookingLedger,
   type Listing,
+  type Venue,
 } from './economy.ts'
 import { lightBeacon, rankParcels, recordVisit } from './discovery.ts'
 import { arrive, depart, whoIsIn, type PresenceHub } from './presence.ts'
 import { TITLE_DESCRIPTOR, provision } from './titlecontract.ts'
 import { ASSET, parsePriceWei, toSparks } from './sparks.ts'
-import type { Wallet } from './ledgerclient.ts'
+import type { LedgerClient, Wallet } from './ledgerclient.ts'
 
 export interface PrincipalVerifier {
   principal(token: string): Promise<Principal>
@@ -119,6 +129,16 @@ export interface ServerDeps {
    * answers 503 rather than zeroes — see `GET /v1/me/balances`.
    */
   readonly wallet?: (subject: string) => Promise<Wallet>
+  /**
+   * The escrow seam behind a Venue's calendar: reserve, release, and the fee that pays the owner.
+   *
+   * Absent when `LEDGER_URL` or the service credential is unset, and the three booking routes then
+   * answer 503 — the same optionality the market seam has, for a stronger reason. A booking is an
+   * escrowed hold (§5); a world that cannot escrow must not take one, because a booking written
+   * without a reservation is the free hold on somebody else's calendar that migration 14 makes
+   * unrepresentable. Refusing the route is the honest form of the same refusal.
+   */
+  readonly escrow?: BookingLedger & Pick<LedgerClient, 'reserve'>
   /**
    * The ward-governance seam. Absent when `COMMUNITY_URL` is unset, same optionality: a ward with
    * no community is the state every ward is minted in, so an unconfigured upstream removes a
@@ -534,11 +554,188 @@ function buildRoutes(): Route[] {
       if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
       const body = await readJson(ctx.req)
       const flags: { isVenue?: boolean; isWorkshop?: boolean; gateOpen?: boolean } = {}
+      // `isVenue: true` is answered 400 here and not served: a Venue posts what an hour costs, and
+      // opening one is `PUT /v1/parcels/:id/venue` below. `false` still closes one, terms and all.
       if (typeof body['isVenue'] === 'boolean') flags.isVenue = body['isVenue']
       if (typeof body['isWorkshop'] === 'boolean') flags.isWorkshop = body['isWorkshop']
       if (typeof body['gateOpen'] === 'boolean') flags.gateOpen = body['gateOpen']
       const parcel = await setParcelFlags(deps.sql, id, subject, flags)
       return { status: 200, body: { parcel } }
+    }),
+
+    /* ------------------------------------------------------------------ a Venue's calendar */
+
+    /**
+     * Open a Venue, or re-price one. **`PUT`, because posting a rate is idempotent** — the same
+     * body twice leaves the same Venue at the same rate, and there is no second Venue to create.
+     *
+     * The rate arrives as a decimal STRING through `parsePriceWei`, which demands `/^\d{1,78}$/`
+     * before `BigInt`: `BigInt('')` is `0n`, and a missing rate silently becoming a free calendar
+     * is the precise defect this whole feature exists to close. The database refuses zero as well.
+     * This is the door; `tessera_venue_rate_is_positive` is the wall.
+     */
+    define('PUT', '/v1/parcels/:id/venue', async (ctx, deps) => {
+      const { subject } = await requireUser(ctx, deps)
+      const id = ctx.params['id'] ?? ''
+      if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
+      const body = await readJson(ctx.req)
+      const rateWei = parsePriceWei(body['rateWei'], 'rateWei')
+      const venue = await openVenue(deps.sql, id, subject, rateWei)
+      return { status: 200, body: { venue: serialiseVenue(venue) } }
+    }),
+
+    define('GET', '/v1/parcels/:id/venue', async (ctx, deps) => {
+      const principal = await authenticate(ctx, deps)
+      if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
+      const id = ctx.params['id'] ?? ''
+      if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
+      const venue = await venueOf(deps.sql, id)
+      if (!venue) return errorReply(404, 'not_a_venue', 'that parcel is not a Venue', ctx.requestId)
+      return { status: 200, body: { venue: serialiseVenue(venue) } }
+    }),
+
+    /**
+     * Take an hour — or twelve — of a Venue's calendar, against an escrowed hold.
+     *
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * **THE PRICE IS NOT IN THE BODY, AND THAT IS THE FEATURE.**
+     *
+     * `priceWei` used to be an argument to `bookVenue` with `price_wei >= 0` behind it, which
+     * made a zero-price hold on somebody else's calendar legal. It is now read from the parcel —
+     * `venueOf` — multiplied by the hours asked for, escrowed at that figure, and checked against
+     * the owner's rate a third time by the database as the row lands. A body that sends a price
+     * is ignored rather than refused, because there is no price to send.
+     *
+     * ── THE ORDER, AND THE ROLLBACK ─────────────────────────────────────────────────────────
+     *
+     * Reserve first, then write the booking: `bookings_open_holds_money` refuses an open booking
+     * that names no hold, so the hold has to exist before there is anything to name it. That
+     * leaves exactly one window — a reservation taken for a booking that then fails — and the
+     * `catch` below is what closes it. **A hold that outlives its failed booking is the same
+     * stranded EMBER this whole change exists to end**, arrived at from the other direction, and
+     * a route that reserved and walked away on a 409 would have reintroduced it on the busiest
+     * path in the feature (two people booking one slot).
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     */
+    define('POST', '/v1/parcels/:id/bookings', async (ctx, deps) => {
+      const { subject } = await requireUser(ctx, deps)
+      const id = ctx.params['id'] ?? ''
+      if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
+      const escrow = deps.escrow
+      if (!escrow) return escrowUnconfigured(ctx)
+      const body = await readJson(ctx.req)
+      const slot = parseSlot(body['slot'])
+      const hours = body['hours'] === undefined ? 1 : requireInteger(body, 'hours', 1, 12)
+
+      const venue = await venueOf(deps.sql, id)
+      if (!venue) {
+        return errorReply(404, 'not_a_venue', 'no such Venue, or it posts no rate', ctx.requestId)
+      }
+      const priceWei = venue.rateWei * BigInt(hours)
+
+      // Keyed on the request rather than on the booking's natural key. A transport-level retry of
+      // THIS request replays the same hold; a fresh attempt after a failure takes a fresh one,
+      // which is what the rollback below needs — a key derived from (parcel, slot, booker) would
+      // replay a hold this route had already released and attach a dead reservation to a booking.
+      const hold = await escrow.reserve({
+        subject,
+        amountWei: priceWei,
+        actor: `user:${subject.slice('user:'.length)}`,
+        correlationId: ctx.requestId,
+        idempotencyKey: `tessera:booking-hold:${ctx.requestId}`,
+        description: `Hold ${priceWei} wei for ${hours}h on parcel ${id}`,
+      })
+
+      try {
+        const { bookingId } = await bookVenue(deps.sql, {
+          parcelId: id,
+          slot,
+          hours,
+          bookedBy: subject,
+          escrowedWei: priceWei,
+          reservationId: hold.reservationId,
+          correlationId: ctx.requestId,
+        })
+        const booking = await findBooking(deps.sql, bookingId)
+        return { status: 201, body: { booking: booking ? serialiseBooking(booking) : { id: bookingId } } }
+      } catch (err) {
+        // Best effort, and the failure is LOGGED rather than swallowed or rethrown: the caller's
+        // real error is the booking's, and an operator needs to know if a hold was left standing.
+        try {
+          await escrow.release(hold.reservationId, {
+            actor: `user:${subject.slice('user:'.length)}`,
+            correlationId: ctx.requestId,
+            idempotencyKey: `tessera:booking-hold:${ctx.requestId}:rollback`,
+            description: 'The booking this hold was taken for did not land',
+          })
+        } catch (releaseErr) {
+          ctx.log.error('A BOOKING HOLD WAS LEFT STANDING — money is reserved for no booking', {
+            reservationId: hold.reservationId,
+            subject,
+            parcelId: id,
+            err: releaseErr,
+          })
+        }
+        throw err
+      }
+    }),
+
+    define('GET', '/v1/parcels/:id/bookings', async (ctx, deps) => {
+      const principal = await authenticate(ctx, deps)
+      if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
+      const id = ctx.params['id'] ?? ''
+      if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
+      const bookings = await listBookingsOf(deps.sql, id)
+      return { status: 200, body: { bookings: bookings.map(serialiseBooking) } }
+    }),
+
+    /**
+     * The hour was hosted: release the hold and pay the owner.
+     *
+     * **The owner settles, because the owner is the one who knows.** Only they can say the room
+     * was opened, and only they are paid by it — a booker who could settle their own booking
+     * could pay a Venue for an hour it never gave them, and a platform job that settled on a
+     * timer would pay for every no-show the owner never turned up to.
+     */
+    define('POST', '/v1/bookings/:id/settle', async (ctx, deps) => {
+      const { subject } = await requireUser(ctx, deps)
+      const escrow = deps.escrow
+      if (!escrow) return escrowUnconfigured(ctx)
+      const booking = await bookingFor(ctx, deps)
+      if (booking.ownerSubject !== subject) {
+        throw new ForbiddenError("a booking is settled by the Venue's owner")
+      }
+      const settled = await settleBooking(deps.sql, escrow, {
+        bookingId: booking.id,
+        actor: `user:${subject.slice('user:'.length)}`,
+        correlationId: ctx.requestId,
+      })
+      return { status: 200, body: { booking: serialiseBooking(settled) } }
+    }),
+
+    /**
+     * The hour will not happen: release the hold and pay nobody.
+     *
+     * **Either party**, and deliberately without a deadline. A cancellation fee is a policy this
+     * repository has not decided and must not invent in a route — §7's refusals are the shape
+     * that decision would have to take — and until it is decided the honest behaviour is that the
+     * money goes back. What is NOT optional is that it goes back: `bookings_terminal_frees_the_money`
+     * means a cancelled booking that did not release has no representation.
+     */
+    define('POST', '/v1/bookings/:id/cancel', async (ctx, deps) => {
+      const { subject } = await requireUser(ctx, deps)
+      const escrow = deps.escrow
+      if (!escrow) return escrowUnconfigured(ctx)
+      const booking = await bookingFor(ctx, deps)
+      if (booking.ownerSubject !== subject && booking.bookedBy !== subject) {
+        throw new ForbiddenError('a booking is cancelled by its booker or the Venue owner')
+      }
+      const cancelled = await cancelBooking(deps.sql, escrow, {
+        bookingId: booking.id,
+        actor: `user:${subject.slice('user:'.length)}`,
+        correlationId: ctx.requestId,
+      })
+      return { status: 200, body: { booking: serialiseBooking(cancelled) } }
     }),
 
     /* --------------------------------------------------------------------------- the Kiln */
@@ -909,6 +1106,66 @@ function buildRoutes(): Route[] {
       }
     }),
   ]
+}
+
+function escrowUnconfigured(ctx: RequestContext): Reply {
+  return errorReply(
+    503,
+    'escrow_unconfigured',
+    'a booking is an escrowed hold and no ledger is configured to take or release one',
+    ctx.requestId,
+  )
+}
+
+/** The booking named in `:id`, or a 404 — shared by settle and cancel so they cannot disagree. */
+async function bookingFor(ctx: RequestContext, deps: ServerDeps): Promise<Booking> {
+  const id = ctx.params['id'] ?? ''
+  if (!UUID.test(id)) throw new BadRequestError('a booking id is a uuid')
+  const booking = await findBooking(deps.sql, id)
+  if (!booking) throw new WorldError('not_found', 'no such booking', 404)
+  return booking
+}
+
+/**
+ * The start of a slot, as an instant.
+ *
+ * Only the SHAPE is checked here — that it is a string and a real date. That it is on the hour is
+ * `bookings_slot_is_on_the_hour`'s job and is left to it: a second copy of that rule in this file
+ * is a second thing to keep in step with the calendar, and the database's version is the one that
+ * also holds for a backfill, a job and a psql prompt.
+ */
+function parseSlot(value: unknown): Date {
+  if (typeof value !== 'string') throw new BadRequestError('slot must be an ISO-8601 string')
+  const slot = new Date(value)
+  if (Number.isNaN(slot.getTime())) throw new BadRequestError('slot must be an ISO-8601 instant')
+  return slot
+}
+
+/** A Venue's terms on the wire. A decimal string, never a JSON number — §8.1. */
+function serialiseVenue(venue: Venue): Record<string, unknown> {
+  return {
+    parcelId: venue.parcelId,
+    wardId: venue.wardId,
+    ownerSubject: venue.ownerSubject,
+    rateWei: venue.rateWei.toString(),
+    rateSparks: toSparks(venue.rateWei).toString(),
+  }
+}
+
+/**
+ * A booking on the wire.
+ *
+ * `releasedEntryId` and `settledEntryId` are published rather than kept internal, and that is the
+ * point of them: they are the receipt. A booker looking at a cancelled booking can take
+ * `releasedEntryId` to `GET /entries/:id` on the ledger and see their own money come back, which
+ * is the difference between being told the hold was freed and being able to check.
+ */
+function serialiseBooking(booking: Booking): Record<string, unknown> {
+  return {
+    ...booking,
+    priceWei: booking.priceWei.toString(),
+    priceSparks: toSparks(booking.priceWei).toString(),
+  }
 }
 
 /** A listing on the wire: every amount a decimal string, plus the Sparks the client prints. */
