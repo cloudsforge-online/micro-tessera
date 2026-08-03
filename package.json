@@ -6,7 +6,9 @@
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node --import tsx src/index.ts",
     "migrate": "node --import tsx src/migrator.ts",
@@ -18,12 +20,13 @@
   "_runtimeDependencies": [
     "The @cloudsforge/* runtime and contract packages are consumed as file:/link: paths into the",
     "sibling repositories because they are not published yet. Once AD-02 lands they become registry",
-    "versions and these paths — plus the two named build contexts in the Dockerfile — are deleted.",
+    "versions and these paths \u2014 plus the two named build contexts in the Dockerfile \u2014 are deleted.",
     "tsx is a runtime dependency for the same reason: the unpublished packages resolve to their",
     "TypeScript sources."
   ],
   "dependencies": {
     "@cloudsforge/auth": "link:../runtime/packages/auth",
+    "@cloudsforge/contracts-auth": "link:../contracts/packages/auth",
     "@cloudsforge/contracts-events": "link:../contracts/packages/events",
     "@cloudsforge/contracts-money": "link:../contracts/packages/money",
     "@cloudsforge/contracts-worlds": "link:../contracts/packages/worlds",
