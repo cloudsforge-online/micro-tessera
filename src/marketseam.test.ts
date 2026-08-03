@@ -17,9 +17,9 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
-import { test, before, after, beforeEach } from 'node:test'
+import { test, before, after, beforeEach, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import type postgres from 'postgres'
 import {
   ALICE_SUBJECT,
@@ -543,20 +543,56 @@ test('the estate had no other TOKEN: spelling to match, so this one is pinned', 
 
 /* ──────────────────────────────────────────────────────── the client talks to real routes ── */
 
-test('the client calls the routes micro-market actually serves, read from its source', () => {
-  // ═══════════════════════════════════════════════════════════════════════════════════════════
-  // The @cloudsforge/ui defect, refused. It posted the SSO callback to `/auth/exchange`, a route
-  // identity has never served, and the test pinning it compared the URL against a copy of itself
-  // so it could never fail.
-  //
-  // This reads micro-market's OWN server source and asserts it defines every path this client
-  // calls. It cannot pass against a route that does not exist, because the other side of the
-  // comparison is the other repository.
-  // ═══════════════════════════════════════════════════════════════════════════════════════════
-  const marketServer = readFileSync(
-    new URL('../../market/src/server.ts', import.meta.url),
-    'utf8',
-  )
+/**
+ * The half of the pin that lives in THIS repository, and therefore always runs.
+ *
+ * Split out from the cross-checkout half below because the two have different preconditions and
+ * only one of them can go unmeasured. If this file only ever asserted the sibling side, a CI job
+ * without the siblings would check nothing at all about the paths this client requests.
+ */
+test('this client requests the paths this repository claims it requests', () => {
+  const client = stripComments(readFileSync(new URL('./marketclient.ts', import.meta.url), 'utf8'))
+  assert.ok(client.includes(`'/v1/listings'`))
+  assert.ok(client.includes('/activate'))
+})
+
+/**
+ * The other half: the routes the siblings actually serve.
+ *
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ * The @cloudsforge/ui defect, refused. It posted the SSO callback to `/auth/exchange`, a route
+ * identity has never served, and the test pinning it compared the URL against a copy of itself so
+ * it could never fail. This reads micro-market's and micro-community's OWN server sources and
+ * asserts they define every path this client calls. It cannot pass against a route that does not
+ * exist, because the other side of the comparison is the other repository.
+ *
+ * ── A MISSING SIBLING IS A SKIP, AND NEVER A `return` ────────────────────────────────────────
+ *
+ * It used to be neither: `readFileSync` on a checkout that is not there threw ENOENT and FAILED
+ * the run — `not ok 89 … ENOENT … /market/src/server.ts` in this repository's first honest CI run.
+ * micro-org's service workflow checks out micro-runtime and micro-contracts and no other sibling,
+ * so a per-service job has neither of the two repositories this test compares against.
+ *
+ * A red run for "the estate is not all here" is the same lie as a green one for work that never
+ * happened: both say something about micro-market that this job did not measure. So it skips, and
+ * `t.skip()` rather than `return` — `return` marks it GREEN, which is the failure `citations.test.ts`
+ * opens by naming and the reason `citeIfPresent` exists at all. Where the siblings ARE present —
+ * an estate checkout, and `deploy/scripts/estate-verify.sh` — every assertion below runs unchanged.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ */
+test('the client calls the routes micro-market actually serves, read from its source', (t: TestContext) => {
+  const marketPath = new URL('../../market/src/server.ts', import.meta.url)
+  const communityPath = new URL('../../community/src/server.ts', import.meta.url)
+  const absent = [marketPath, communityPath].filter((path) => !existsSync(path))
+  if (absent.length > 0) {
+    t.skip(
+      `not checked out beside this repository: ${absent.map((path) => path.pathname).join(', ')} — ` +
+        'this pin compares against the other repository, so a job with one checkout cannot resolve it',
+    )
+    return
+  }
+
+  const marketServer = readFileSync(marketPath, 'utf8')
   assert.ok(marketServer.includes(`define('POST', '/v1/listings'`), 'market must serve POST /v1/listings')
   assert.ok(
     marketServer.includes(`define('POST', '/v1/listings/:id/activate'`),
@@ -564,19 +600,11 @@ test('the client calls the routes micro-market actually serves, read from its so
   )
   assert.ok(marketServer.includes(`define('GET', '/v1/listings/:id'`), 'market must serve GET /v1/listings/:id')
 
-  const communityServer = readFileSync(
-    new URL('../../community/src/server.ts', import.meta.url),
-    'utf8',
-  )
+  const communityServer = readFileSync(communityPath, 'utf8')
   assert.ok(
     communityServer.includes(`define('POST', '/v1/communities'`),
     'community must serve POST /v1/communities',
   )
-
-  // And the paths this repository actually requests, so the two halves cannot drift apart.
-  const client = stripComments(readFileSync(new URL('./marketclient.ts', import.meta.url), 'utf8'))
-  assert.ok(client.includes(`'/v1/listings'`))
-  assert.ok(client.includes('/activate'))
 })
 
 test('every source file this seam adds is reachable from the composition root', () => {
