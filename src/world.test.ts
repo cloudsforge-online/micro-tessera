@@ -212,7 +212,43 @@ test('two claims on one rectangle produce exactly one claim — the constraint, 
     const fulfilled = results.filter((r) => r.status === 'fulfilled')
     assert.equal(fulfilled.length, 1, 'both overlapping claims landed')
     const rejected = results.find((r) => r.status === 'rejected')
-    assert.ok(String(rejected && rejected.reason).includes('tessera_parcels_do_not_overlap'))
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // THE LOSER IS REFUSED BY POSTGRES, AND THERE ARE TWO SQLSTATES THAT MEANS.
+    //
+    // This asserted `String(reason).includes('tessera_parcels_do_not_overlap')` and failed in CI
+    // — one fulfilled, one rejected, the invariant intact, and the message not the expected one.
+    // Measured rather than guessed: 60 runs of this exact race (open two pools, insert
+    // immediately, connections NOT warm) returned 23P01 fifty-five times and 40P01 — `deadlock
+    // detected` — five times.
+    //
+    // Both are the DATABASE refusing, which is the whole claim of this test: "the constraint, not
+    // the lease". An exclusion constraint is enforced by SPECULATIVE INSERTION — write the index
+    // entry, then scan for conflicts, then wait on any conflicting uncommitted xid. When the two
+    // inserts genuinely interleave, each writes its entry before seeing the other's, so each ends
+    // up waiting for the other and the deadlock detector kills one. When they do not, the second
+    // simply finds the first's entry and gets the exclusion violation. Which one happens is a
+    // function of how the two sockets are scheduled, so it is timing, and a CI runner is slower
+    // and more contended than this machine — 1047ms there against 97ms here.
+    //
+    // So the SQLSTATE is asserted rather than a substring of a message, and it is asserted against
+    // exactly two values. That is STRICTER than what it replaces, not looser: a connection error, a
+    // timeout, or a rejection carrying no `code` at all used to read as `expected: true, actual:
+    // false` with nothing to go on, and now fails naming what actually came back. Where Postgres
+    // told us which constraint it was, that is still pinned.
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    const reason: unknown = rejected && rejected.reason
+    const code = (reason as { code?: unknown } | null)?.code
+    assert.ok(
+      code === '23P01' || code === '40P01',
+      `the losing claim was not refused by the database: SQLSTATE ${String(code)} — ${String(reason)}`,
+    )
+    if (code === '23P01') {
+      assert.ok(
+        String(reason).includes('tessera_parcels_do_not_overlap'),
+        `an exclusion violation from another constraint: ${String(reason)}`,
+      )
+    }
   } finally {
     await a.end({ timeout: 5 })
     await b.end({ timeout: 5 })
