@@ -1,0 +1,43 @@
+{
+  "name": "@cloudsforge/tessera",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tessera: a persistent isometric world. Wards, parcels claimed free and reclaimed by a fallow clock, objects fired from a prompt, and EMBER earned rather than only spent.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node --import tsx src/index.ts",
+    "migrate": "node --import tsx src/migrator.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/*.test.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "_runtimeDependencies": [
+    "The @cloudsforge/* runtime and contract packages are consumed as file:/link: paths into the",
+    "sibling repositories because they are not published yet. Once AD-02 lands they become registry",
+    "versions and these paths — plus the two named build contexts in the Dockerfile — are deleted.",
+    "tsx is a runtime dependency for the same reason: the unpublished packages resolve to their",
+    "TypeScript sources."
+  ],
+  "dependencies": {
+    "@cloudsforge/auth": "link:../runtime/packages/auth",
+    "@cloudsforge/contracts-events": "link:../contracts/packages/events",
+    "@cloudsforge/contracts-money": "link:../contracts/packages/money",
+    "@cloudsforge/contracts-worlds": "link:../contracts/packages/worlds",
+    "@cloudsforge/db": "link:../runtime/packages/db",
+    "@cloudsforge/http": "link:../runtime/packages/http",
+    "@cloudsforge/jobs": "link:../runtime/packages/jobs",
+    "@cloudsforge/lifecycle": "link:../runtime/packages/lifecycle",
+    "@cloudsforge/telemetry": "link:../runtime/packages/telemetry",
+    "postgres": "^3.4.5",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "jose": "^5.9.6",
+    "typescript": "^5.7.2"
+  }
+}
