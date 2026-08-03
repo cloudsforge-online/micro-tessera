@@ -14,13 +14,13 @@
  * able to succeed, and could not have been: the body it sent had a `prompt` field, a `kind` and a
  * `userId`, and studio's real generate route takes none of those three.
  *
- * The route table is `studio/src/server.ts:363-492` and it is nine routes long. The two that
+ * The route table is `studio/src/server.ts:363-507` and it is nine routes long. The two that
  * matter here are `POST /v1/brand-kits` (`:373`) and `POST /v1/brand-kits/:id/generate` (`:418`),
  * and the shape of the second is the reason firing is TWO calls rather than one:
  *
  *   **studio takes no prompt.** `POST /v1/brand-kits/:id/generate` reads `kind`, `width`,
  *   `height`, `format` and `backend` from the body and nothing else. The prompt is BUILT by
- *   studio, in `buildPrompt` (`studio/src/prompt.ts:127-152`), out of the kind's own style
+ *   studio, in `buildPrompt` (`studio/src/prompt.ts:127-157`), out of the kind's own style
  *   paragraph and the BRAND KIT's `stylePrompt` — and it is built once and stored on the job, so
  *   that "editing prompt.ts changes what a delivered asset claims to have been generated from"
  *   cannot happen. A caller therefore does not send a prompt; it puts the player's description on
@@ -37,20 +37,20 @@
  *
  *   1. Tessera calls studio with a service token holding `studio:write`. A **service** principal
  *      skips ownership narrowing entirely — `assertOwned` returns early at
- *      `studio/src/server.ts:561` — and names the acting user via `body.userId` (`subjectOf`,
- *      `studio/src/server.ts:533-536`). So a title generates on a player's behalf without
+ *      `studio/src/server.ts:576` — and names the acting user via `body.userId` (`subjectOf`,
+ *      `studio/src/server.ts:548-551`). So a title generates on a player's behalf without
  *      impersonating them. `subjectUserId` (`runtime/packages/auth/src/index.ts:220-229`) throws
  *      `no_subject_user` — a 401 — when a service omits it, so the kit CANNOT accidentally be
  *      owned by `service:tessera`; the brand kit belongs to the player, and it is checked below.
- *   2. Generate answers **202 with a `statusUrl`** (`studio/src/server.ts:454-465`). Generation is
+ *   2. Generate answers **202 with a `statusUrl`** (`studio/src/server.ts:469-480`). Generation is
  *      a leased job on studio's side too, so this client polls that URL rather than holding a
  *      socket open for a minute of diffusion.
  *   3. The status body is `{ job, provenance }` — **nested**, both halves. `job.status` is the
  *      state (`queued | running | succeeded | failed`, `generation.ts:51`) and the checksum is on
- *      `provenance`, not on `job`: `wireJob` (`server.ts:498-518`) does not carry it and
+ *      `provenance`, not on `job`: `wireJob` (`server.ts:513-533`) does not carry it and
  *      `provenanceOf` (`generation.ts:465-487`) does. A client reading a flat body — which this
  *      one used to — sees neither field and waits until its deadline.
- *   4. The checksum comes back `sha256:<hex>` (`studio/src/assets.ts:77-79`) and IS the object's
+ *   4. The checksum comes back `sha256:<hex>` (`studio/src/assets.ts:78-80`) and IS the object's
  *      identity.
  *
  * **The polling here is inside a leased job, not a timer.** It is a bounded `await` loop with an
@@ -146,12 +146,12 @@ export interface GenerateOutcome {
    * `studio/src/backend.ts:460`) — and **not published on the job status**.
    *
    * `wireJob` and `provenanceOf` both omit it; it exists on the ASSET
-   * (`studio/src/assets.ts:60`) and on the `studio.asset.created` event, neither of which this
-   * service can reach. So this is `null` — "not measured here" — rather than `false`. `false` is
-   * an assertion, and it would be an assertion that was wrong in the invisible direction on every
-   * single firing, which is precisely §2.2's "a repo that asserts it is a repo that will be wrong
-   * quietly". The read below is by field name, so the day studio publishes it the value flows
-   * through with no change here.
+   * (the `Asset` interface, `studio/src/assets.ts:46-63`) and on the `studio.asset.created` event,
+   * neither of which this service can reach. So this is `null` — "not measured here" — rather than
+   * `false`. `false` is an assertion, and it would be an assertion that was wrong in the invisible
+   * direction on every single firing, which is precisely §2.2's "a repo that asserts it is a repo
+   * that will be wrong quietly". The read below is by field name, so the day studio publishes it
+   * the value flows through with no change here.
    */
   readonly c2pa: boolean | null
 }
@@ -216,7 +216,7 @@ export function createStudioClient(options: StudioClientOptions): StudioClient {
       if (description.length === 0) {
         // Refused HERE rather than discovered as a 500 inside studio: `buildPrompt` throws
         // outright on a `world_object` with an empty `stylePrompt`
-        // (`studio/src/prompt.ts:138-140`), because "a firing with no description would otherwise
+        // (`studio/src/prompt.ts:143-145`), because "a firing with no description would otherwise
         // silently generate 'a Tessera', which is not an object anybody asked for".
         throw new StudioError('a firing has no description to build a prompt from')
       }
@@ -226,13 +226,13 @@ export function createStudioClient(options: StudioClientOptions): StudioClient {
         headers: await authorize(),
         body: {
           // Names the acting user WITHOUT impersonating them — the shape studio's service lane
-          // exists for (`subjectOf`, studio/src/server.ts:533-536). Omitting it is a 401, not a
+          // exists for (`subjectOf`, studio/src/server.ts:548-551). Omitting it is a 401, not a
           // kit quietly owned by `service:tessera`.
           userId: userIdOf(input.authorSubject),
           name: kitNameFor(input.objectId),
           accent: KIT_ACCENT,
           // The player's words, and only the player's words. Studio wraps them:
-          // "The object is: <stylePrompt>" (`studio/src/prompt.ts:146`).
+          // "The object is: <stylePrompt>" (`studio/src/prompt.ts:151`).
           stylePrompt: description.slice(0, 2_000),
         },
       })

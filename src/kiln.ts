@@ -7,7 +7,7 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  * A FIRING IS A LEASED JOB, NOT A REQUEST HANDLER — ON BOTH SIDES.
  *
- * `micro-studio` returns **202 with a `statusUrl`** (`studio/src/server.ts:454-465`);
+ * `micro-studio` returns **202 with a `statusUrl`** (`studio/src/server.ts:469-480`);
  * `requestGeneration` opens no socket (`studio/src/generation.ts:173-238`) and `runGeneration`
  * executes inside a lease claimed `for update skip locked`. Its lease key is `owner:<subject>`
  * (`studio/src/generation.ts:234`).
@@ -18,8 +18,8 @@
  * requests that studio then serialises anyway, with nine of them holding a lease slot for nothing.
  *
  * The service token this calls with holds `studio:write`. §9.1: "A **service** principal skips
- * ownership narrowing entirely — `assertOwned` returns early at `studio/src/server.ts:561` — and
- * names the acting user via `body.userId` (`subjectOf`, `studio/src/server.ts:533-536`). So a
+ * ownership narrowing entirely — `assertOwned` returns early at `studio/src/server.ts:576` — and
+ * names the acting user via `body.userId` (`subjectOf`, `studio/src/server.ts:548-551`). So a
  * title can generate on a player's behalf without impersonating them."
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
@@ -299,7 +299,7 @@ export async function completeFiring(sql: Db, outcome: FiringOutcome): Promise<W
 
     // `studio_asset_id` is NOT written here, and its emptiness is a fact about studio rather than
     // an omission: `GET /v1/jobs/:id` answers `{ job, provenance }` and neither carries the
-    // asset's id (`wireJob`, `studio/src/server.ts:498-518`; `provenanceOf`,
+    // asset's id (`wireJob`, `studio/src/server.ts:513-533`; `provenanceOf`,
     // `studio/src/generation.ts:465-487`). It exists on `studio.asset.created`, which this
     // service does not consume. The generation job id IS known, and is written by
     // `recordGeneration` when studio hands it over rather than here at the end.
@@ -372,15 +372,53 @@ export interface AnchorInput {
 /**
  * Record that authorship was written to Hearth's Registry of Authorship.
  *
- * §9.3: v1 anchors with a PLATFORM key through the existing `mint` deploy path, because a player
- * cannot sign through custody — signing purposes are `deployer | treasury | deposit` and `user` is
- * deliberately excluded (`custody/src/gates.ts:31`, `:34`). Anchoring is lazy and user-initiated:
- * written when a creator first LISTS an object, not when they fire it, "because most objects are
- * never sold and paying gas to anchor a chair nobody sells is waste."
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * NOTHING CALLS THIS YET, AND THE REASON IS NOT THE ONE THIS COMMENT USED TO GIVE.
+ *
+ * It claimed v1 anchors "through the existing `mint` deploy path". Checked, and it is false, which
+ * matters because it made the gap look like wiring rather than a contract that does not exist:
+ *
+ *   - `mint` deploys a CLOSED catalogue of three ERC-20 token contracts — `fixed | mintable |
+ *     foundry` (`mint/src/catalogue.ts:28`) — each with bytecode committed beside it
+ *     (`:43`, `:51`, `:60`), chosen by `variantFor(features)` over `mintable | burnable |
+ *     pausable`. There is no fourth variant and no route that deploys arbitrary bytecode, so there
+ *     is no "existing path" a registry could travel down.
+ *   - `hearth/contracts/src/` holds the HearthV2 AMM (Router, Factory, Pair, ERC20), WEMBER and
+ *     Multicall3. There is NO Registry of Authorship contract; the Solidity has never been
+ *     written. A grep for "authorship" across `micro-hearth` returns nothing.
+ *
+ * So three things must land before this function has a caller, in this order:
+ *   1. A Registry of Authorship contract in `hearth/contracts/src/`, and a deployment of it — no
+ *      contract has ever been deployed to a running Hearth.
+ *   2. A fourth variant in `mint/src/catalogue.ts` carrying its committed bytecode, or a general
+ *      deploy path. Today's catalogue cannot express a non-token contract.
+ *   3. A caller here, at the seam §9.3 names: written when a creator first LISTS an object, not
+ *      when they fire it, "because most objects are never sold and paying gas to anchor a chair
+ *      nobody sells is waste."
+ *
+ * The platform key is right and is not a blocker: a player cannot sign through custody, whose
+ * signable purposes are `deployer | treasury | deposit` (`custody/src/gates.ts:35`) with `user`
+ * deliberately excluded and the reason given at `:31`. §9.3 gates v2 PLAYER-SIGNED deeds on that;
+ * it does not gate v1.
+ *
+ * ── WHY THIS IS KEPT RATHER THAN DELETED ──────────────────────────────────────────────────────
+ *
+ * A registered topic nothing emits is usually dead code. This one is not, and the difference is
+ * checkable: `micro-notify` has a COMPLETE, unblocked rule for `tessera.object.anchored`
+ * (`notify/src/catalogue.ts:1137`) with a template (`notify/src/templates.ts:397`) and its own
+ * tests, and `contracts` registers it as audited with `subjectKind: 'user'`
+ * (`contracts/packages/events/src/audit.ts:323`) because "the platform acts with authority over a
+ * user's property". Deleting the emitter would strand a written consumer and require editing two
+ * other repositories to keep them honest.
+ *
+ * What WAS wrong is that this function had no caller and no test, so its payload's agreement with
+ * that waiting consumer was never checked. It is exercised now — see kiln.test.ts — against the
+ * fields notify actually reads. Unwired is a fact about the chain; unverified was a defect here.
  *
  * `objects_anchor_is_whole` refuses half an anchor and `objects_anchor_needs_bytes` refuses one
  * against an object with no content address, so an anchor row that exists is one the chain can be
  * asked about.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 export async function recordAnchor(sql: Db, input: AnchorInput): Promise<WorldObject> {
   return withOutbox(sql, async (tx, emit) => {

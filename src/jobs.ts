@@ -247,7 +247,7 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
         // put a prompt on that payload: `index.ts:254` enqueues `{ objectId, subject }`. So even
         // against a route that existed, every firing would have asked studio to generate from an
         // empty description — which studio refuses outright for a `world_object`
-        // (`studio/src/prompt.ts:138-140`), because an empty one "would silently generate 'a
+        // (`studio/src/prompt.ts:143-145`), because an empty one "would silently generate 'a
         // Tessera', which is not an object anybody asked for".
         //
         // The row holds the description, the author, and how far the last attempt got. Reading

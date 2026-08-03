@@ -218,7 +218,7 @@ test('a firing reaches fired, with studios own checksum and studios own brief', 
 
   // ── C2PA IS NULL, AND null IS NOT false ──────────────────────────────────────────────────
   // Studio measures it off the bytes and does not publish it on the job: neither `wireJob`
-  // (`studio/src/server.ts:498-518`) nor `provenanceOf` (`generation.ts:465-487`) carries it. So
+  // (`studio/src/server.ts:513-533`) nor `provenanceOf` (`generation.ts:465-487`) carries it. So
   // "nobody measured this" is the truth and `false` would be an assertion — one that would have
   // been wrong in the invisible direction on every firing this service ever does.
   assert.equal(kept?.c2pa, null, 'c2pa was asserted rather than measured')

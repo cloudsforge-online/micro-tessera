@@ -30,6 +30,7 @@ import {
   firingLeaseKey,
   listPlacements,
   placeObjects,
+  recordAnchor,
   removePlacement,
   requestFiring,
 } from './kiln.ts'
@@ -78,7 +79,7 @@ test('the canvas is 512 and is a multiple of 16, which is what FLUX floors to', 
  * `promptFor()` built the projection, the light and the ground here, and this test read them back
  * — a function agreeing with itself. Studio takes NO prompt on its generate route
  * (`studio/src/server.ts:418-430`): it builds one from the kind's own paragraph and the brand
- * kit's `stylePrompt` (`studio/src/prompt.ts:127-152`). So the string this test was grading was
+ * kit's `stylePrompt` (`studio/src/prompt.ts:127-157`). So the string this test was grading was
  * never sent anywhere, and could not have been.
  *
  * What is left here is the list and its own shape. Whether the BRIEF actually survives is a claim
@@ -419,4 +420,115 @@ test('a firing emits tessera.object.fired keyed by the object, carrying the MEAS
   assert.equal(rows[0]?.key, object.id)
   assert.equal(rows[0]?.payload['c2pa'], false)
   assert.equal(rows[0]?.payload['authorSubject'], ALICE_SUBJECT)
+})
+
+/**
+ * Why micro-studio's new 400 cannot reach this service.
+ *
+ * studio now refuses a `world_object` generation whose kit carries an empty `stylePrompt` with a
+ * **400** (`studio/src/server.ts`, the `world_object` check inside the generate route) where it
+ * used to 500 inside `buildPrompt`. That change is invisible here — but only because of THIS
+ * guard, which was itself untested, so the claim "behaviourally unaffected" rested on nothing.
+ *
+ * The refusal is in two places on purpose and both are checked: the route never admits an empty
+ * prompt, and `createKit` refuses again before opening a socket, so no firing can put an empty
+ * `stylePrompt` on a kit even if a second caller appears.
+ */
+test('an empty prompt is refused here, so studios 400 is unreachable', { skip }, async () => {
+  await seedAccounts(sql, ALICE_SUBJECT)
+  for (const prompt of ['', '   ', '\n\t ']) {
+    await assert.rejects(
+      () =>
+        requestFiring(asDb(sql), {
+          authorSubject: ALICE_SUBJECT,
+          prompt,
+          category: 'seating',
+          footprint: '1x1',
+          correlationId: 'req-empty',
+        }),
+      (err: unknown) => err instanceof WorldError && err.status === 400,
+      `a prompt of ${JSON.stringify(prompt)} was accepted`,
+    )
+  }
+  // Nothing was written, so no job can later carry an empty description to studio.
+  const rows = await sql<{ n: bigint }[]>`select count(*) as n from objects`
+  assert.equal(Number(rows[0]?.n), 0)
+})
+
+/* ------------------------------------------------------------------------------ anchoring */
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * `recordAnchor` HAS NO CALLER, AND HAD NO TEST EITHER. THE SECOND WAS THE ACTUAL DEFECT.
+ *
+ * Nothing calls it because the Registry of Authorship contract does not exist — not in
+ * `hearth/contracts/src/`, and not as a variant `mint` can deploy. See the function's own comment.
+ * That is a fact about the chain and cannot be fixed here.
+ *
+ * What COULD be fixed here is that the payload was never checked against the consumer already
+ * waiting on it. `micro-notify`'s rule (`notify/src/catalogue.ts:1148-1166`) reads exactly four
+ * things off this event, and `userOfSubject` on the first of them decides whether anybody is told
+ * at all — so a payload that dropped `authorSubject` would resolve nobody for ever, which is the
+ * `no-subject` failure this repository just fixed on two OTHER topics. These tests grade the four
+ * fields the consumer reads, by name, so the day a caller lands the event is already right.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+test('an anchor emits the four fields notify reads, keyed by the object', { skip }, async () => {
+  await seedAccounts(sql, ALICE_SUBJECT)
+  const id = await seedObject(sql, ALICE_SUBJECT)
+  const anchored = await recordAnchor(asDb(sql), {
+    objectId: id,
+    transactionHash: `0x${'ab'.repeat(32)}`,
+    blockNumber: 4_242n,
+    correlationId: 'req-anchor',
+  })
+  assert.equal(anchored.anchorTx, `0x${'ab'.repeat(32)}`)
+
+  const rows = await sql<{ key: string; actor: string; payload: Record<string, unknown> }[]>`
+    select key, actor, payload from outbox where topic = 'tessera.object.anchored'
+  `
+  assert.equal(rows.length, 1)
+  // `keyedBy: 'object_id'` — and notify falls back to `event.key` for the object id, so this is
+  // load-bearing on the consumer side and not only on the ordering side.
+  assert.equal(rows[0]?.key, id)
+  // The actor is `system`: the platform signs this, not the author. notify's comment calls
+  // `forUser` "impossible here, not merely unwise" for exactly this reason, which is why the
+  // author must travel as a FIELD.
+  assert.equal(rows[0]?.actor, 'system')
+
+  const payload = rows[0]?.payload ?? {}
+  // The field `userOfSubject` resolves the recipient from. Without it the rule answers
+  // `no_recipient` for ever — the defect this repository closed on fallowed and booked.
+  assert.equal(payload['authorSubject'], ALICE_SUBJECT)
+  assert.equal(payload['objectId'], id)
+  // Rendered into the template's `{{transactionHash}}` and `{{blockNumber}}`
+  // (`notify/src/templates.ts:400-404`). A blank block number makes the sentence unverifiable.
+  assert.equal(payload['transactionHash'], `0x${'ab'.repeat(32)}`)
+  assert.equal(String(payload['blockNumber']), '4242')
+})
+
+test('an object anchors once — a second anchor is refused, not a second event', { skip }, async () => {
+  await seedAccounts(sql, ALICE_SUBJECT)
+  const id = await seedObject(sql, ALICE_SUBJECT)
+  const first = { objectId: id, transactionHash: `0x${'cd'.repeat(32)}`, blockNumber: 7n }
+  await recordAnchor(asDb(sql), { ...first, correlationId: 'req-1' })
+  // `where ... and anchor_tx is null` is what makes this a refusal rather than an overwrite. A
+  // re-anchor would otherwise replace a real transaction hash with a second one and emit a second
+  // notification for one fact — and notify dedupes on the OBJECT, so the second is silent.
+  await assert.rejects(
+    () =>
+      recordAnchor(asDb(sql), {
+        objectId: id,
+        transactionHash: `0x${'ef'.repeat(32)}`,
+        blockNumber: 8n,
+        correlationId: 'req-2',
+      }),
+    (err: unknown) => err instanceof WorldError && err.status === 404,
+  )
+  const rows = await sql<{ n: bigint }[]>`
+    select count(*) as n from outbox where topic = 'tessera.object.anchored'
+  `
+  assert.equal(Number(rows[0]?.n), 1)
+  const kept = await findObject(asDb(sql), id)
+  assert.equal(kept?.anchorTx, `0x${'cd'.repeat(32)}`, 'the first anchor was overwritten')
 })
