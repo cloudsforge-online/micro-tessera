@@ -1444,6 +1444,42 @@ export const MIGRATIONS: readonly Migration[] = [
         for each row execute function tessera_ward_governance_does_not_move();
     `,
   },
+
+  {
+    version: 12,
+    name: 'a_ward_slug_has_a_shape',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- A WARD SLUG HAS A SHAPE, AND UNTIL NOW ONLY TYPESCRIPT BELIEVED IT.
+      --
+      -- \`wards_slug_key\` guarantees slugs are DISTINCT. Nothing guaranteed they were short, or
+      -- lowercase, or free of a trailing hyphen — and all three matter, because a ward slug is
+      -- not only a ward slug. \`communityclient.ts:109\` builds a ward's government slug as
+      -- \`\\\`ward-\${cleaned}\\\`.slice(0, 64)\` to satisfy micro-community's own CHECK
+      -- (\`^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$\`). So two ward slugs that differ only past
+      -- character 59 are ONE community slug, and the ward that founds its government second gets
+      -- a unique violation out of somebody else's database.
+      --
+      -- 59 = 64 - len('ward-'). Written as the arithmetic so a reader can check it: the pattern
+      -- below admits 1 character, or 2, or 2 + up to 57 + 1 = 59.
+      --
+      -- This is the invariant \`wardSlugFrom\`'s 12-character truncation was reaching for and got
+      -- wrong in the one way that matters: it bounded the length by DISCARDING the identity, so
+      -- two paid entitlements collided. The length belongs here, where a handler, a backfill and
+      -- a psql prompt are all held to it; the injectivity belongs in the derivation.
+      --
+      -- Every slug this service has ever written passes: 'commons', 'ward-<n>' from the mint
+      -- sweep, and 'private-<40 hex>' from a provision. The ALTER validates the existing rows, so
+      -- a database holding a slug that does not — one hand-written by an operator, say — fails
+      -- the migration rather than silently keeping it.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      do $$ begin
+        alter table wards add constraint wards_slug_shape
+          check (slug ~ '^[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?$');
+      exception when duplicate_object then null; end $$;
+    `,
+  },
+
 ]
 
 /**

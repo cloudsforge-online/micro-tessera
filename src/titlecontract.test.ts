@@ -132,6 +132,43 @@ test('the ward slug is derived from the entitlement id, so two users cannot coll
   const c = wardSlugFrom(request({ entitlementId: 'ent-cccc', metadata: { name: 'Same Name' } }))
   assert.notEqual(b, c)
   assert.match(a, /^private-/)
+  // Deterministic: the same entitlement derives the same slug on every replica and every replay.
+  assert.equal(a, wardSlugFrom(request({ entitlementId: 'ent-aaaa', metadata: { name: 'Other' } })))
+})
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE DERIVATION IS INJECTIVE, AND THE CASE BELOW IS THE ONE THAT WAS BROKEN IN PRODUCTION.
+ *
+ * `worlds/src/conformance.ts:182` mints `conformance-${crypto.randomUUID()}`. Under the previous
+ * rule — strip non-alphanumerics, take twelve characters — `conformance` is ELEVEN characters, so
+ * every conformance run in the estate's history maps to one of SIXTEEN slugs. The second run had
+ * a fifteen-in-sixteen chance of colliding with the first.
+ *
+ * The 500 that produced is asserted over HTTP in `purchase.live.test.ts`. This is the derivation
+ * on its own: the collision does not happen at all, which is the half that belongs here.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+test('the sixteen slugs worlds conformance used to produce are sixteen different slugs', () => {
+  const slugs = new Set(
+    Array.from({ length: 64 }, (_, i) =>
+      wardSlugFrom(request({ entitlementId: `conformance-${String(i).padStart(2, '0')}00000-0000-4000-8000-000000000000` })),
+    ),
+  )
+  assert.equal(slugs.size, 64, 'two conformance entitlements derived one slug')
+
+  // And the two shapes that are not injective before any truncation at all: separators are not
+  // stripped, so `ent-1` and `ent1` are different wards.
+  assert.notEqual(wardSlugFrom(request({ entitlementId: 'ent-1' })), wardSlugFrom(request({ entitlementId: 'ent1' })))
+
+  // Bounded, because `wardCommunitySlug` prefixes `ward-` and truncates at 64 — a longer slug
+  // would move this exact defect into micro-community's database. `wards_slug_shape` (migration
+  // 12) holds the same 59 in the schema.
+  for (const id of ['x', 'x'.repeat(4_000), 'conformance-00000000-0000-4000-8000-000000000000']) {
+    const slug = wardSlugFrom(request({ entitlementId: id }))
+    assert.ok(slug.length <= 59, `${slug} is ${slug.length} characters`)
+    assert.match(slug, /^[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?$/, `${slug} fails wards_slug_shape`)
+  }
 })
 
 test('a hostile or absent metadata name is replaced, never 400d — the money is already taken', () => {
