@@ -142,6 +142,49 @@ test('the same bytes fired twice resolve to the ORIGINAL author — copybot, ans
     select count(*)::int as n from objects where checksum = ${checksum}
   `
   assert.equal(count[0]?.n, 1)
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // THE ASSERTIONS ABOVE GRADE THE HANDLER. THESE GRADE THE DATABASE, AND THEY WERE ADDED
+  // BECAUSE A MUTATION SWEEP SHOWED THE DIFFERENCE.
+  //
+  // Dropping `tessera_objects_are_their_bytes` and re-running this file left it GREEN. Everything
+  // above still passed, because `completeFiring` does a SELECT and branches — so with the index
+  // gone it still returns the original object and still writes one row. The test was measuring an
+  // `if`, which is precisely the estate's "four tests passing while grading the wrong function".
+  //
+  // The `if` is the sentence a user reads. The INDEX is the guarantee, and it is the only half
+  // that survives a concurrent firing, a backfill or a psql prompt — a SELECT-then-INSERT is a
+  // race, and without a unique index two firings that resolve the same bytes at the same instant
+  // both pass the check and both insert. So the index is asked directly.
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  await assert.rejects(
+    () => sql`insert into objects (author_subject, prompt, category, footprint, status, checksum)
+              values (${BOB_SUBJECT}, 'a stool', 'seating', '1x1', 'fired', ${checksum})`,
+    (err: unknown) => String(err).includes('tessera_objects_are_their_bytes'),
+    'a raw INSERT created a second object at one content address — ownership is not derived after all',
+  )
+
+  // And genuinely concurrently, on two connections, which is the shape the handler cannot defend
+  // against on its own.
+  const a = openDb(2)
+  const b = openDb(2)
+  const racing = `sha256:${'99'.repeat(32)}`
+  try {
+    const results = await Promise.allSettled([
+      a`insert into objects (author_subject, prompt, category, footprint, status, checksum)
+        values (${ALICE_SUBJECT}, 'x', 'seating', '1x1', 'fired', ${racing})`,
+      b`insert into objects (author_subject, prompt, category, footprint, status, checksum)
+        values (${BOB_SUBJECT}, 'x', 'seating', '1x1', 'fired', ${racing})`,
+    ])
+    assert.equal(
+      results.filter((r) => r.status === 'fulfilled').length,
+      1,
+      'two authors landed at one content address',
+    )
+  } finally {
+    await a.end({ timeout: 5 })
+    await b.end({ timeout: 5 })
+  }
 })
 
 test('there is no owner column on objects, and authorship cannot be re-pointed', { skip }, async () => {
