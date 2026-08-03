@@ -1480,6 +1480,47 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
 
+  {
+    version: 13,
+    name: 'the_kilns_upstream_ids',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- THE TWO IDS A FIRING NEEDS TO RESUME, BECAUSE A RETRY THAT CANNOT RESUME PAYS TWICE.
+      --
+      -- \`kiln.fire\` is a leased job with five attempts. Firing is two calls to micro-studio: a
+      -- brand kit (\`POST /v1/brand-kits\`) and then a generation against it
+      -- (\`POST /v1/brand-kits/:id/generate\`, \`studio/src/server.ts:418\`). Neither reads an
+      -- Idempotency-Key — studio's only idempotency key is the one it sends BILLING, at
+      -- \`studio/src/credits.ts:260\` — so an attempt that dies after either call and starts over
+      -- from nothing repeats it.
+      --
+      -- Repeating the kit is a 409: kit names are unique per owner, and the retry is then wedged
+      -- for ever because studio serves no route that finds a kit by name. Repeating the
+      -- GENERATION is worse and is quiet: it is a second FLUX call, reserved and settled against
+      -- the owner's cap in real USD (\`studio/src/credits.ts\`), for an object that already exists.
+      --
+      -- So both ids are written the moment studio hands them over, and \`jobs.ts\` resumes from
+      -- them. \`studio_status_url\` (migration 5) already held the second one's address and nothing
+      -- had ever written to it.
+      --
+      -- \`studio_asset_id\` is deliberately NOT set by the firing, and its emptiness is a fact
+      -- about studio rather than an omission here: \`GET /v1/jobs/:id\` answers
+      -- \`{ job, provenance }\` (\`studio/src/server.ts:472-479\`) and NEITHER shape carries the
+      -- asset's id — \`wireJob\` at \`:498-518\` and \`provenanceOf\` at \`generation.ts:465-487\`.
+      -- The id exists only on \`studio.asset.created\`, an event this service does not consume.
+      -- Recording the generation job id in the asset column would be a lie that
+      -- \`GET /v1/assets/:id\` would 404 on; the column stays null until studio publishes the id.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      alter table objects add column if not exists studio_brand_kit_id       text;
+      alter table objects add column if not exists studio_generation_job_id  text;
+
+      -- One firing per generation. Two objects pointing at one studio job would mean two objects
+      -- claiming one set of bytes, which \`tessera_objects_are_their_bytes\` refuses a moment later
+      -- and which this refuses a moment earlier, with a name that says which half went wrong.
+      create unique index if not exists tessera_one_object_per_generation
+        on objects (studio_generation_job_id) where studio_generation_job_id is not null;
+    `,
+  },
 ]
 
 /**

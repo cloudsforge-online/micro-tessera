@@ -49,7 +49,14 @@
 import { JobRunner, type JobQueue, type RunnerEvent } from '@cloudsforge/jobs'
 import type { Logger } from '@cloudsforge/telemetry'
 import { createRelay, type Db, type RelayDeps } from './outbox.ts'
-import { completeFiring, failFiring, firingLeaseKey } from './kiln.ts'
+import {
+  completeFiring,
+  failFiring,
+  firingLeaseKey,
+  firingProgressOf,
+  recordBrandKit,
+  recordGeneration,
+} from './kiln.ts'
 import { openWard, resolveContest, wardsNeedingANeighbour, type Archetype } from './world.ts'
 import type { StudioClient } from './studioclient.ts'
 
@@ -214,7 +221,9 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
    * sides." A different key here would mean Tessera dispatching ten requests studio then
    * serialises anyway, with nine holding a lease slot for nothing.
    */
-  runner.register<{ objectId?: string; subject?: string; prompt?: string }>(
+  // `prompt` is deliberately NOT a payload field. It was one, in the type only — nothing ever set
+  // it — and the handler read it. The description lives on the object row; see below.
+  runner.register<{ objectId?: string; subject?: string }>(
     KILN_FIRE_KIND,
     async (job, ctx) => {
       const objectId = job.payload.objectId
@@ -231,19 +240,66 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
       }
       if (ctx.signal.aborted) return
       try {
-        const outcome = await deps.studio.generate({
-          objectId,
-          subject,
-          prompt: typeof job.payload.prompt === 'string' ? job.payload.prompt : '',
-          signal: ctx.signal,
-        })
+        // ═════════════════════════════════════════════════════════════════════════════════════
+        // THE ROW IS THE STATE, NOT THE PAYLOAD — AND THE PAYLOAD NEVER HELD THE PROMPT.
+        //
+        // This handler used to read `job.payload.prompt`, falling back to `''`. Nothing has ever
+        // put a prompt on that payload: `index.ts:254` enqueues `{ objectId, subject }`. So even
+        // against a route that existed, every firing would have asked studio to generate from an
+        // empty description — which studio refuses outright for a `world_object`
+        // (`studio/src/prompt.ts:138-140`), because an empty one "would silently generate 'a
+        // Tessera', which is not an object anybody asked for".
+        //
+        // The row holds the description, the author, and how far the last attempt got. Reading
+        // the AUTHOR from the row rather than from the payload matters for the same reason
+        // migration 11 gives about market's seller: the row is who fired it, and the kit studio
+        // mints has to belong to them.
+        // ═════════════════════════════════════════════════════════════════════════════════════
+        const progress = await firingProgressOf(deps.sql, objectId)
+        if (!progress) {
+          // A payload naming an object that does not exist cannot be made valid by retrying.
+          throw new Error(`${KILN_FIRE_KIND} names object ${objectId}, which does not exist`)
+        }
+        if (progress.status !== 'firing') {
+          // Already fired or already failed. A redelivery has nothing to do, and re-running would
+          // buy a second generation for an object that has its bytes.
+          deps.logger.info('firing already settled; the redelivery has nothing to do', {
+            objectId,
+            status: progress.status,
+          })
+          return
+        }
+
+        let statusUrl = progress.statusUrl
+        if (!statusUrl) {
+          let brandKitId = progress.brandKitId
+          if (!brandKitId) {
+            const kit = await deps.studio.createKit({
+              objectId,
+              authorSubject: progress.authorSubject,
+              description: progress.description,
+            })
+            brandKitId = kit.brandKitId
+            // Written BEFORE the generation is asked for. A crash in the gap is then a resumable
+            // firing rather than one wedged behind a kit name studio will 409 for ever.
+            await recordBrandKit(deps.sql, objectId, brandKitId)
+          }
+          const started = await deps.studio.startGeneration({ brandKitId })
+          // Likewise, and this one is money: studio reserves and settles a real FLUX call against
+          // the owner's cap, and reads no idempotency key. A retry that started a second
+          // generation would charge twice for one object, quietly.
+          await recordGeneration(deps.sql, objectId, started.generationJobId, started.statusUrl)
+          statusUrl = started.statusUrl
+        }
+        await ctx.heartbeat()
+
+        const outcome = await deps.studio.awaitGeneration({ statusUrl, signal: ctx.signal })
         await completeFiring(deps.sql, {
           objectId,
           checksum: outcome.checksum,
-          studioAssetId: outcome.assetId,
-          // MEASURED off the bytes by studio, carried through unchanged. §2.2: "The estate
-          // measures c2pa and never asserts it; a repo that asserts it is a repo that will be
-          // wrong quietly."
+          // MEASURED off the bytes by studio, carried through unchanged — and `null` when studio
+          // published no measurement, which is today. §2.2: "The estate measures c2pa and never
+          // asserts it; a repo that asserts it is a repo that will be wrong quietly."
           c2pa: outcome.c2pa,
           correlationId: `firing-${objectId}`,
         })

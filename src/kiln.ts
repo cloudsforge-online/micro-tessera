@@ -181,10 +181,86 @@ export async function requestFiring(sql: Db, input: FireInput): Promise<WorldObj
 export interface FiringOutcome {
   readonly objectId: string
   readonly checksum: string
-  readonly studioAssetId: string
-  /** MEASURED off the bytes by studio, never asserted. §2.2, §9.1. */
-  readonly c2pa: boolean
+  /**
+   * MEASURED off the bytes by studio, never asserted. §2.2, §9.1.
+   *
+   * `null` when studio did not publish a measurement — which today is always, because neither
+   * `wireJob` nor `provenanceOf` carries `c2pa` (see `studioclient.ts`'s `GenerateOutcome`). Null
+   * means "nobody measured this"; `false` would mean "somebody measured it and it was absent",
+   * and the two must not be one value on a claim about provenance.
+   */
+  readonly c2pa: boolean | null
   readonly correlationId: string
+}
+
+/**
+ * Where a firing got to with micro-studio, so a retried lease resumes instead of starting over.
+ *
+ * The two upstream ids are read from the row rather than carried on the job payload for the same
+ * reason the object's own prompt is: `index.ts` enqueues `{ objectId, subject }` and nothing else,
+ * a `RunnerEvent` carries no payload at all, and a payload is written once whereas a row is
+ * written as the work progresses. See migration 12 for what a firing that cannot resume costs.
+ */
+export interface FiringProgress {
+  readonly objectId: string
+  readonly authorSubject: string
+  /** The PLAYER's description. Studio composes the brief around it; see `studioclient.ts`. */
+  readonly description: string
+  readonly status: WorldObject['status']
+  readonly brandKitId: string | null
+  readonly generationJobId: string | null
+  readonly statusUrl: string | null
+}
+
+export async function firingProgressOf(sql: Db, objectId: string): Promise<FiringProgress | null> {
+  const rows = await sql<
+    {
+      id: string
+      author_subject: string
+      prompt: string
+      status: string
+      studio_brand_kit_id: string | null
+      studio_generation_job_id: string | null
+      studio_status_url: string | null
+    }[]
+  >`
+    select id, author_subject, prompt, status, studio_brand_kit_id, studio_generation_job_id,
+           studio_status_url
+      from objects where id = ${objectId}
+  `
+  const row = rows[0]
+  if (!row) return null
+  return {
+    objectId: row.id,
+    authorSubject: row.author_subject,
+    description: row.prompt,
+    status: row.status as WorldObject['status'],
+    brandKitId: row.studio_brand_kit_id,
+    generationJobId: row.studio_generation_job_id,
+    statusUrl: row.studio_status_url,
+  }
+}
+
+/** Record the brand kit studio minted for this firing, before the generation is asked for. */
+export async function recordBrandKit(sql: Db, objectId: string, brandKitId: string): Promise<void> {
+  await sql`
+    update objects set studio_brand_kit_id = ${brandKitId}
+     where id = ${objectId} and studio_brand_kit_id is null
+  `
+}
+
+/** Record the generation studio accepted, the moment it answers 202 and before the first poll. */
+export async function recordGeneration(
+  sql: Db,
+  objectId: string,
+  generationJobId: string,
+  statusUrl: string,
+): Promise<void> {
+  await sql`
+    update objects
+       set studio_generation_job_id = ${generationJobId}, studio_status_url = ${statusUrl}
+     where id = ${objectId} and studio_generation_job_id is null
+  `
 }
 
 /**
@@ -221,11 +297,16 @@ export async function completeFiring(sql: Db, outcome: FiringOutcome): Promise<W
       return toObject(already)
     }
 
+    // `studio_asset_id` is NOT written here, and its emptiness is a fact about studio rather than
+    // an omission: `GET /v1/jobs/:id` answers `{ job, provenance }` and neither carries the
+    // asset's id (`wireJob`, `studio/src/server.ts:498-518`; `provenanceOf`,
+    // `studio/src/generation.ts:465-487`). It exists on `studio.asset.created`, which this
+    // service does not consume. The generation job id IS known, and is written by
+    // `recordGeneration` when studio hands it over rather than here at the end.
     const rows = await tx<ObjectRow[]>`
       update objects
          set status = 'fired',
              checksum = ${outcome.checksum},
-             studio_asset_id = ${outcome.studioAssetId},
              c2pa = ${outcome.c2pa}
        where id = ${outcome.objectId} and status = 'firing'
       returning ${tx.unsafe(OBJECT_COLUMNS)}

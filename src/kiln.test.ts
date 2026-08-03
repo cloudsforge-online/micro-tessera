@@ -4,6 +4,7 @@
 
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import type postgres from 'postgres'
 import {
   ALICE_SUBJECT,
@@ -17,6 +18,7 @@ import {
   seedObject,
   seedWard,
   skip,
+  stripComments,
 } from './testsupport.ts'
 import {
   CATEGORIES,
@@ -32,7 +34,7 @@ import {
   requestFiring,
 } from './kiln.ts'
 import { WorldError } from './world.ts'
-import { promptFor } from './studioclient.ts'
+import { REQUIRED_PROMPT_CLAUSES, briefClausesMissingFrom, kitNameFor } from './studioclient.ts'
 
 let sql: postgres.Sql
 
@@ -68,17 +70,44 @@ test('the canvas is 512 and is a multiple of 16, which is what FLUX floors to', 
   assert.equal(OBJECT_CANVAS % 16, 0)
 })
 
-test('the prompt fixes the projection, the light and the ground — a user cannot override the brief', () => {
-  const prompt = promptFor('a three-legged stool')
-  assert.match(prompt, /a three-legged stool/)
-  assert.match(prompt, /2:1 dimetric/)
-  assert.match(prompt, /#12100f/)
-  assert.match(prompt, /painterly gouache/)
-  // No outlines, no bevels, no gloss — §1.1's direction, which is what makes one player's chair
-  // sit in the same world as another player's chair.
-  assert.match(prompt, /no outline/)
-  assert.match(prompt, /no bevel/)
-  assert.match(prompt, /no gloss/)
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * THIS TEST USED TO CHECK THIS REPOSITORY'S OWN COPY OF THE BRIEF, AND THAT IS WHY IT WAS GREEN
+ * WHILE THE KILN COULD NOT FIRE AT ALL.
+ *
+ * `promptFor()` built the projection, the light and the ground here, and this test read them back
+ * — a function agreeing with itself. Studio takes NO prompt on its generate route
+ * (`studio/src/server.ts:418-430`): it builds one from the kind's own paragraph and the brand
+ * kit's `stylePrompt` (`studio/src/prompt.ts:127-152`). So the string this test was grading was
+ * never sent anywhere, and could not have been.
+ *
+ * What is left here is the list and its own shape. Whether the BRIEF actually survives is a claim
+ * about studio's output, and it is asserted in `kiln.live.test.ts` against a real firing's
+ * `provenance.prompt` — which is the only place it can be true or false.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+test('the brief this title requires of studio is a list, not a second copy of the paragraph', () => {
+  // §1.1's and §2.1's load-bearing clauses. The projection is what makes one player's chair sit
+  // in the same world as another player's chair; #12100f is what the cutout keys against.
+  for (const clause of ['painterly gouache', '2:1 dimetric', '#12100f', 'no outline', 'no bevel', 'no gloss']) {
+    assert.ok(REQUIRED_PROMPT_CLAUSES.includes(clause), `${clause} is not required of studio`)
+  }
+  // And this repository holds no second copy of the paragraph to drift from studio's.
+  const source = readFileSync(new URL('./studioclient.ts', import.meta.url), 'utf8')
+  assert.equal(
+    /three-quarter isometric view from above-left/.test(stripComments(source)),
+    false,
+    'the world-object style paragraph is written here as well as in studio — two briefs, one world',
+  )
+})
+
+test('a firings brand kit is named for the object, so a retry finds the one it already made', () => {
+  // `brand_kits_owner_name_uniq` (studio/src/migrations.ts:125) makes a repeat a 409, and studio
+  // serves no route that finds a kit by name — so the name must be derivable and stable.
+  assert.equal(kitNameFor('abc'), 'tessera-object-abc')
+  assert.equal(kitNameFor('abc'), kitNameFor('abc'))
+  assert.notEqual(kitNameFor('abc'), kitNameFor('abd'))
+  assert.ok(kitNameFor('0'.repeat(36)).length <= 200, 'studio caps a kit name at 200 characters')
 })
 
 test('the firing lease key is the shape studio uses, so one players firings serialise on both sides', () => {
@@ -102,7 +131,6 @@ test('the same bytes fired twice resolve to the ORIGINAL author — copybot, ans
   await completeFiring(asDb(sql), {
     objectId: alices.id,
     checksum,
-    studioAssetId: 'asset-1',
     c2pa: true,
     correlationId: 'r1',
   })
@@ -118,7 +146,6 @@ test('the same bytes fired twice resolve to the ORIGINAL author — copybot, ans
   const resolved = await completeFiring(asDb(sql), {
     objectId: bobs.id,
     checksum,
-    studioAssetId: 'asset-2',
     c2pa: true,
     correlationId: 'r2',
   })
@@ -380,7 +407,6 @@ test('a firing emits tessera.object.fired keyed by the object, carrying the MEAS
   await completeFiring(asDb(sql), {
     objectId: object.id,
     checksum: `sha256:${'ef'.repeat(32)}`,
-    studioAssetId: 'a-1',
     // Studio measured FALSE. It must arrive as false, not be defaulted to true anywhere —
     // §2.2: "a repo that asserts it is a repo that will be wrong quietly".
     c2pa: false,

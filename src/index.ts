@@ -131,6 +131,9 @@ const studio =
         // `@cloudsforge/auth`'s ServiceTokenProvider is the estate's answer to keeping one live;
         // until this service is granted a credential in the deploy, the credential IS the token.
         token: async () => env.serviceCredential ?? '',
+        // So a world object generated off the world's brief is a line somebody can find, rather
+        // than a chair that quietly does not match the ward it stands in.
+        logger: logger.child({ upstream: 'studio' }),
       })
     : undefined
 
