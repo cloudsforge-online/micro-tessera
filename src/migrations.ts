@@ -1267,6 +1267,39 @@ export const MIGRATIONS: readonly Migration[] = [
       exception when duplicate_object then null; end $$;
     `,
   },
+
+  {
+    version: 10,
+    name: 'urn-is-the-contracts-urn',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- THE URN SHAPE WAS WRONG, AND IT IS CORRECTED BY A NEW MIGRATION RATHER THAN AN EDIT.
+      --
+      -- Migration 8 wrote \`check (urn ~ '^urn:cloudsforge:tessera:')\`, which is a shape this
+      -- estate does not use. \`titleUrn\` in @cloudsforge/contracts-worlds builds
+      -- \`cf:<title>:<kind>:<id>\` and \`parseTitleUrn\` refuses anything else — "expected
+      -- 'cf:<title>:<kind>:<id>'". So every provision would have been refused by this service's
+      -- own CHECK, or, had the CHECK been the lenient one, accepted here and refused by worlds.
+      --
+      -- It is caught here rather than in production because the contract owns the shape and this
+      -- service parses its own URN back through \`parseTitleUrn\` in \`titlecontract.ts\` — the
+      -- same defect \`contracts/packages/worlds/src/index.ts:200\` records aetherholm still has,
+      -- where the URN is built by template literal and never checked.
+      --
+      -- A NEW MIGRATION, not an edit to 8, and that is the rule rather than fastidiousness:
+      -- @cloudsforge/db checksums each migration's text and refuses a run where an applied one
+      -- changed, because two databases would otherwise disagree about what "version 8" means. Any
+      -- database that already ran 8 gets the correction; a fresh one runs 8 then 10 and lands in
+      -- the same place.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      alter table provisions drop constraint if exists provisions_urn_shape;
+
+      do $$ begin
+        alter table provisions add constraint provisions_urn_is_a_title_urn
+          check (urn ~ '^cf:tessera:[a-z0-9][a-z0-9_-]*:.+$');
+      exception when duplicate_object then null; end $$;
+    `,
+  },
 ]
 
 /**
