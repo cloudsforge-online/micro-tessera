@@ -326,34 +326,85 @@ export function reservePostings(subject: string, amountWei: bigint): readonly Po
   ]
 }
 
-/**
- * Release a creator's cleared proceeds from `payout_due` to `available`.
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * THERE IS NO PAYOUT FUNCTION HERE, AND ITS ABSENCE IS A CORRECTION RATHER THAN AN OMISSION.
  *
- * §8.2: "nothing in Tessera ever debits `payout_due` except the release, and a spend attempt
- * against it would be an overdraft the ledger's `ledger_assert_no_overdraft` trigger refuses."
+ * This file used to export `releasePostings` and `releasePayout`, moving a creator's cleared
+ * proceeds from `payout_due` to `available`. They had ZERO CALLERS, which read like unfinished
+ * work and was in fact a hazard: **micro-market already does both halves, and Tessera doing them
+ * too would be a second service releasing one payout.**
  *
- * This is the ONLY function in this repository that names `payout_due` as a debit side, and
- * `economy.test.ts` greps the whole source to prove it — because "only the release debits it" is a
- * claim about the repository and no single call site can make it.
+ * Read out of market's source rather than assumed:
+ *
+ *   * **The credit.** Settlement is one balanced entry whose proceeds leg lands in the SELLER's
+ *     `payout_due` — `market/src/orders.ts:339` (`proceedsPurpose: holdProceeds ? 'payout_due' :
+ *     'available'`) on `subject: listing.sellerSubject` (`:388`).
+ *   * **The release.** `releaseProceeds` (`market/src/orders.ts:696`) moves `payout_due` →
+ *     `available` once `payout_due_at` has passed, driven by a LEASED JOB — `PAYOUT_KIND`,
+ *     `market/src/jobs.ts:322`, fed by `duePayouts` (`orders.ts:789`).
+ *
+ * So a creator IS paid, end to end, by the service that holds the sale. What was actually missing
+ * was never a payout: it was that **no Tessera listing had ever reached micro-market**, so no sale
+ * could settle and there was nothing to release. `activateListing` is that fix, and it is why this
+ * function is not.
+ *
+ * A Tessera release would debit `user:<creator> / EMBER / payout_due` for money market had already
+ * moved. The ledger would REFUSE it — a user's `payout_due` is `liability`, which
+ * `ledger_assert_no_overdraft` does not exempt — so it would fail loudly rather than silently
+ * double-pay. That is the ledger being right, not a reason to keep the code: `market/src/escrow.ts`
+ * calls the same shape "market has become a second ledger and the trial balance has stopped
+ * meaning anything", and this is that from the other side.
+ *
+ * **What Tessera's money genuinely is: engagement grants out of `engagement:tessera`, and booking
+ * reservations.** Sale proceeds are market's. `economy.test.ts` asserts this over the whole
+ * repository as ZERO `payout_due` debit sites, because "Tessera never releases a payout" is a
+ * claim about the repository that no single call site can make.
+ *
+ * `PAYOUT_DUE` is still imported, and only for READING: `GET /v1/me/balances` shows a creator what
+ * they are owed and what has cleared. Showing a balance is not moving one.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
  */
-export function releasePostings(subject: string, amountWei: bigint): readonly PostingRequest[] {
-  return [
-    { account: holder(subject, PAYOUT_DUE), direction: 'debit', amount: amountWei, assetCode: ASSET, sequence: 0 },
-    { account: holder(subject, AVAILABLE), direction: 'credit', amount: amountWei, assetCode: ASSET, sequence: 1 },
-  ]
+
+/** §8.2's three figures, and no fourth. Every one a `bigint`; the wire carries decimal strings. */
+export interface Wallet {
+  /** Spendable now. */
+  readonly availableWei: bigint
+  /** Held against an open venue booking. Theirs, but committed. */
+  readonly reservedWei: bigint
+  /** Sold, not yet cleared. Market releases it when the dispute window runs — see above. */
+  readonly payoutDueWei: bigint
 }
 
-export async function releasePayout(
-  ledger: LedgerClient,
-  input: { subject: string; amountWei: bigint; idempotencyKey: string; correlationId: string },
-): Promise<{ id: string; replayed: boolean }> {
-  return ledger.postEntry({
-    kind: 'payout',
-    actor: 'system',
-    correlationId: input.correlationId,
-    idempotencyKey: input.idempotencyKey,
-    postings: releasePostings(input.subject, input.amountWei),
-  })
+/**
+ * What a player has, read from the ledger.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **AN ABSENT BALANCE IS ZERO HERE, AND THAT IS SAFE ONLY BECAUSE OF WHERE IT IS DECIDED.**
+ *
+ * `micro-tessera-web` refuses to print a digit it cannot obtain, on the grounds that a zero is
+ * `BigInt('')` — the estate's oldest money hazard, an empty string silently becoming zero on a
+ * screen showing somebody their own earnings. That instinct is right and this function does not
+ * undermine it: the zero below is not parsed from an empty string, it is the ledger's own answer.
+ * An account with no postings HAS no balance row, and `0n` is the true reading of that.
+ *
+ * The distinction the client needs is preserved by the ROUTE rather than by this value: if the
+ * ledger cannot be reached, `GET /v1/me/balances` answers 503 and no number at all. "We have none"
+ * and "we could not fetch them" must never look the same to a client — the same rule
+ * `market/src/server.ts:858` states for its risk indicators.
+ *
+ * `LedgerClient.balances` already refuses an amount that is not `/^-?\d{1,78}$/` before calling
+ * `BigInt`, so a malformed figure is dropped rather than becoming `0n` through the back door.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export async function walletOf(ledger: LedgerClient, subject: string): Promise<Wallet> {
+  const balances = await ledger.balances(subject)
+  const of = (purpose: string): bigint =>
+    balances.find((b) => b.purpose === purpose)?.amount ?? 0n
+  return {
+    availableWei: of(AVAILABLE),
+    reservedWei: of('reserved'),
+    payoutDueWei: of(PAYOUT_DUE),
+  }
 }
 
 /* ------------------------------------------------------------------------- issuing an object */

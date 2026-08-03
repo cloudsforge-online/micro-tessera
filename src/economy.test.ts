@@ -38,7 +38,7 @@ import {
   draftListing,
   platformTerms,
 } from './economy.ts'
-import { ENGAGEMENT_REF, grantPostings, releasePostings, reservePostings, balanceCheck } from './ledgerclient.ts'
+import { ENGAGEMENT_REF, grantPostings, reservePostings, balanceCheck } from './ledgerclient.ts'
 import { entitlementKindFor } from './inbound.ts'
 import { fromSparks } from './sparks.ts'
 import { WorldError } from './world.ts'
@@ -280,11 +280,28 @@ test('a grant debits the engagement account and balances, and the postings are t
 /**
  * §8.2, asserted about the WHOLE REPOSITORY rather than about one call site.
  *
- * "nothing in Tessera ever debits `payout_due` except the release". No single function can make
- * that claim, so this scans every source file for a `payout_due` debit and requires the only one
- * to be `releasePostings`.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **THIS TEST USED TO REQUIRE EXACTLY ONE `payout_due` DEBIT. IT NOW REQUIRES NONE, AND THAT IS A
+ * CORRECTION RATHER THAN A RELAXATION.**
+ *
+ * The one debit it allowed was `releasePostings`, which had zero callers. Reading micro-market's
+ * source rather than the design prose showed why it should never gain one:
+ *
+ *   * market credits the SELLER's `payout_due` at settlement (`market/src/orders.ts:339`, `:388`),
+ *     and
+ *   * market RELEASES it to `available` when the dispute window has run — `releaseProceeds`
+ *     (`orders.ts:696`) driven by a leased job (`market/src/jobs.ts:322`, `PAYOUT_KIND`).
+ *
+ * So a Tessera release would be a second service moving one payout. The ledger would refuse it —
+ * a user's `payout_due` is `liability`, which `ledger_assert_no_overdraft` does not exempt — but
+ * "the database catches it" is not a reason to keep code whose only correct number of calls is
+ * zero. Tessera's money is engagement grants and booking reservations; sale proceeds are market's.
+ *
+ * Written as a scan over every source file because "Tessera never releases a payout" is a claim
+ * about the repository, and no single call site can make it.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
-test('payout_due is debited in exactly one place, and that place is the release', () => {
+test('Tessera never debits payout_due — releasing a creator\'s proceeds is micro-market\'s job', () => {
   const dir = new URL('.', import.meta.url)
   const files = readdirSync(dir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
   assert.ok(files.length > 8, 'no sources were scanned; this check is grading nothing')
@@ -295,15 +312,15 @@ test('payout_due is debited in exactly one place, and that place is the release'
     const pattern = /PAYOUT_DUE\s*\)\s*,\s*direction:\s*'debit'/g
     for (const _ of source.matchAll(pattern)) sites.push(file)
   }
-  assert.deepEqual(sites, ['ledgerclient.ts'], 'payout_due is debited somewhere other than the release')
+  assert.deepEqual(sites, [], 'Tessera debits payout_due somewhere — that is micro-market paying twice')
 
-  // And the release moves it to available, so the money does not vanish.
-  const release = releasePostings(ALICE_SUBJECT, 100n)
-  assert.equal(release[0]?.account.purpose, 'payout_due')
-  assert.equal(release[0]?.direction, 'debit')
-  assert.equal(release[1]?.account.purpose, 'available')
-  assert.equal(release[1]?.direction, 'credit')
-  balanceCheck(release)
+  // And the function itself is gone, not merely uncalled. An exported `releasePayout` with no
+  // callers is an invitation; the absence is the guard.
+  const ledgerSource = stripComments(
+    readFileSync(new URL('./ledgerclient.ts', import.meta.url), 'utf8'),
+  )
+  assert.ok(!/export\s+(async\s+)?function\s+releasePayout\b/.test(ledgerSource))
+  assert.ok(!/export\s+function\s+releasePostings\b/.test(ledgerSource))
 })
 
 test('a reservation is a posting from available to reserved — two accounts, not two columns', () => {

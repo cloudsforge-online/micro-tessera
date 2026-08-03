@@ -28,7 +28,7 @@ import { createPresenceHub } from './presence.ts'
 import { createStudioClient } from './studioclient.ts'
 import { createMarketClient } from './marketclient.ts'
 import { createCommunityClient, wardCommunitySlug } from './communityclient.ts'
-import { createLedgerClient, issueObjectToAuthor } from './ledgerclient.ts'
+import { createLedgerClient, issueObjectToAuthor, walletOf } from './ledgerclient.ts'
 import { activateListing } from './economy.ts'
 import { bindWardCommunity } from './world.ts'
 import type { Db } from './outbox.ts'
@@ -223,6 +223,9 @@ const server = createServer({
         },
       }
     : {}),
+  // The wallet strip. Bound whenever a LEDGER is configured, independently of market: a player's
+  // balances are worth showing in a world that cannot yet sell anything.
+  ...(ledger ? { wallet: (subject: string) => walletOf(ledger, subject) } : {}),
   ...(community
     ? {
         governance: {

@@ -89,7 +89,8 @@ import {
 import { lightBeacon, rankParcels, recordVisit } from './discovery.ts'
 import { arrive, depart, whoIsIn, type PresenceHub } from './presence.ts'
 import { TITLE_DESCRIPTOR, provision } from './titlecontract.ts'
-import { parsePriceWei, toSparks } from './sparks.ts'
+import { ASSET, parsePriceWei, toSparks } from './sparks.ts'
+import type { Wallet } from './ledgerclient.ts'
 
 export interface PrincipalVerifier {
   principal(token: string): Promise<Principal>
@@ -113,6 +114,11 @@ export interface ServerDeps {
   readonly market?: {
     activate(input: ActivateListingInput): Promise<Listing>
   }
+  /**
+   * Reads a player's ledger balances. Absent when `LEDGER_URL` is unset, and the route then
+   * answers 503 rather than zeroes — see `GET /v1/me/balances`.
+   */
+  readonly wallet?: (subject: string) => Promise<Wallet>
   /**
    * The ward-governance seam. Absent when `COMMUNITY_URL` is unset, same optionality: a ward with
    * no community is the state every ward is minted in, so an unconfigured upstream removes a
@@ -839,6 +845,68 @@ function buildRoutes(): Route[] {
     define('GET', '/v1/me/parcels', async (ctx, deps) => {
       const { subject } = await requireUser(ctx, deps)
       return { status: 200, body: { parcels: await listParcelsOf(deps.sql, subject) } }
+    }),
+
+    /**
+     * §8.2's three figures: what a player can spend, what is committed, and what is owed.
+     *
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * **READ FROM THE LEDGER, NEVER FROM A COLUMN HERE, AND 503 RATHER THAN A ZERO.**
+     *
+     * There is no balance column anywhere in this service and there must not be one —
+     * 04-domain-model §11, and `market/src/escrow.ts`'s warning about becoming a second ledger.
+     * This route asks `micro-ledger` and reports what it says.
+     *
+     * `micro-tessera-web` refuses to print a digit it cannot obtain, on the grounds that "a zero
+     * is `BigInt('')`". It is right, and this route is built to keep that refusal meaningful: an
+     * unreachable or unconfigured ledger answers **503 with no figures**, never `0`. A player
+     * looking at their own earnings must never be shown a confident zero that means "we did not
+     * ask". The client can then say "unavailable" instead of "you have nothing", which are very
+     * different sentences to read after selling something.
+     *
+     * Every amount is a decimal STRING on the wire, beside the Sparks the client prints — the
+     * same shape `serialiseListing` uses, for the same reason: a JSON number is an IEEE 754
+     * double and one EMBER is 10^18 wei.
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     */
+    define('GET', '/v1/me/balances', async (ctx, deps) => {
+      const { subject } = await requireUser(ctx, deps)
+      if (!deps.wallet) {
+        return errorReply(
+          503,
+          'ledger_unconfigured',
+          'balances are unavailable — this is not a balance of zero',
+          ctx.requestId,
+        )
+      }
+      let wallet: Wallet
+      try {
+        wallet = await deps.wallet(subject)
+      } catch (err) {
+        // Logged with the reason, answered without one. An upstream that is down is a 503, and
+        // emphatically not a 200 carrying zeroes.
+        ctx.log.error('the ledger could not be read; balances are unavailable', { err })
+        return errorReply(
+          503,
+          'ledger_unavailable',
+          'balances are unavailable — this is not a balance of zero',
+          ctx.requestId,
+        )
+      }
+      return {
+        status: 200,
+        body: {
+          assetCode: ASSET,
+          balances: {
+            availableWei: wallet.availableWei.toString(),
+            availableSparks: toSparks(wallet.availableWei).toString(),
+            reservedWei: wallet.reservedWei.toString(),
+            reservedSparks: toSparks(wallet.reservedWei).toString(),
+            payoutDueWei: wallet.payoutDueWei.toString(),
+            payoutDueSparks: toSparks(wallet.payoutDueWei).toString(),
+          },
+        },
+      }
     }),
   ]
 }
