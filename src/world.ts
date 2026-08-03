@@ -15,7 +15,7 @@
 import type { Db, Emit, Tx } from './outbox.ts'
 import { withOutbox } from './outbox.ts'
 import { PARCEL_CLAIMED, PARCEL_FALLOWED, PARCEL_TRANSFERRED, WARD_OPENED } from './topics.ts'
-import { bankedUntilFor, fallowStateOf, type FallowState } from './fallow.ts'
+import { BANKED_DAYS, fallowStateOf, type FallowState } from './fallow.ts'
 
 /** The eight ward archetypes of §2.4. The database holds the same list in a CHECK. */
 export const ARCHETYPES = Object.freeze([
@@ -502,10 +502,31 @@ export async function bankParcel(sql: Db, input: BankInput): Promise<Parcel> {
         409,
       )
     }
-    const until = bankedUntilFor(current.last_active_at)
     try {
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      // THE DEADLINE IS COMPUTED BY POSTGRES, NOT HERE — AND THE FIRST DRAFT GOT THIS WRONG.
+      //
+      // It read `bankedUntilFor(current.last_active_at)` and sent the resulting JS `Date`. The
+      // trigger `parcels_banking_guard` checks the value against `last activity + interval '270
+      // days'` computed in SQL, and the two do not agree: a JS `Date` is millisecond-precision
+      // while `timestamptz` is microsecond, so the round trip drops sub-millisecond digits and
+      // the equality fails. Every bank was refused with "banking sets banked_until to last
+      // activity + 270 days, nothing else" — a trigger correctly refusing a value its own caller
+      // computed, which is exactly what "one arithmetic, in one place" exists to prevent. The
+      // test caught it; it is recorded here rather than quietly fixed because the shape recurs
+      // wherever a deadline is computed on both sides.
+      //
+      // `bankedUntilFor` is still exported and still tested — it is what a CLIENT uses to show
+      // "banked until March" before the button is pressed. It is not what writes the row.
+      // ═══════════════════════════════════════════════════════════════════════════════════════
       const rows = await tx<ParcelRow[]>`
-        update parcels set banked_until = ${until}, banked_at = now()
+        update parcels
+           set banked_until = greatest(
+                 claimed_at,
+                 coalesce(last_footfall_at, claimed_at),
+                 coalesce(last_edit_at, claimed_at)
+               ) + interval '${tx.unsafe(String(BANKED_DAYS))} days',
+               banked_at = now()
          where id = ${input.parcelId}
         returning ${tx.unsafe(PARCEL_COLUMNS)}
       `
