@@ -3,7 +3,7 @@
 A persistent, user-made world you enter in a browser tab: claim ground, fire objects out of a
 prompt, open a place people go to, and get paid in EMBER when they buy what you made.
 
-**The design authority is [`docs/ecosystem/23-tessera.md`](../docs/ecosystem/23-tessera.md).** This
+**Design authority: [`ecosystem/23-tessera.md`](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/23-tessera.md).** This
 file says what is built, what is not, and what was found while building it. Where the two disagree,
 the disagreement is recorded here rather than smoothed over.
 
@@ -163,3 +163,10 @@ Phase 2 and beyond, stated so nobody looks for it:
   snapshotted; the `POST` to `micro-market` that turns a draft into a live listing is not wired.
   `activateListing` is the seam it will call.
 * **`micro-tessera-web`.** A separate repository, against the routes above.
+
+---
+
+## Provenance
+
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
+human direction and review.
