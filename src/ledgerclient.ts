@@ -45,7 +45,7 @@ import {
 import type { LiveScope } from '@cloudsforge/contracts-auth'
 import { ASSET } from './sparks.ts'
 import { GRANT_ENTRY_KIND, AVAILABLE, PAYOUT_DUE } from './economy.ts'
-import { SERVICE } from './env.ts'
+import { SERVICE } from './service.ts'
 
 /**
  * The scopes this module's credential must carry, declared here so the deploy can mint exactly

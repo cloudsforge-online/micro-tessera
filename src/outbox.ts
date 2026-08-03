@@ -63,7 +63,7 @@ import type { Sql, TransactionSql } from 'postgres'
 import { HttpClient } from '@cloudsforge/http'
 import type { Logger } from '@cloudsforge/telemetry'
 import type { Handler } from '@cloudsforge/jobs'
-import { SERVICE } from './env.ts'
+import { SERVICE } from './service.ts'
 import { versionOf } from './topics.ts'
 
 export type Db = Sql

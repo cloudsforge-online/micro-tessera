@@ -42,7 +42,7 @@ import { withOutbox } from './outbox.ts'
 import { VENUE_BOOKED } from './topics.ts'
 import { ASSET, parsePriceWei, splitSale, type SaleSplit } from './sparks.ts'
 import { ensureAccount, WorldError } from './world.ts'
-import { SERVICE } from './env.ts'
+import { SERVICE } from './service.ts'
 import { objectAssetCode, objectUrn } from './itemasset.ts'
 import type { MarketClient } from './marketclient.ts'
 

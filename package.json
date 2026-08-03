@@ -44,7 +44,13 @@
     "(react and react-dom are peer deps the cite subpath never touches) and dist/cite.js is committed,",
     "so this pulls in no tree and needs no build step. It is linked rather than reimplemented here",
     "because a second copy of a citation checker in a second repository is the exact defect",
-    "studioclient.ts complains about: two spellings of one brief, with nothing comparing them."
+    "studioclient.ts complains about: two spellings of one brief, with nothing comparing them.",
+    "",
+    "THE LINK IS DANGLING IN CI, and that is expected rather than broken: the reusable service",
+    "workflow checks out micro-runtime and micro-contracts and no other sibling, so neither",
+    "micro-ui nor micro-studio is there. The tests that need studio skip; the import of ./cite is",
+    "therefore deferred behind that skip and its specifier computed, so `tsc` never resolves a",
+    "package the job was never given. See the header of src/citations.test.ts."
   ],
   "devDependencies": {
     "@cloudsforge/ui": "link:../ui/packages/ui",

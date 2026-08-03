@@ -59,9 +59,32 @@ const studioUrl = process.env['TESSERA_TEST_STUDIO_URL']
 const studioToken = process.env['TESSERA_TEST_STUDIO_TOKEN']
 
 const live = enabled && Boolean(studioUrl) && Boolean(studioToken)
-const skip = live
-  ? false
-  : 'set TESSERA_TEST_DATABASE_URL, TESSERA_TEST_STUDIO_URL and TESSERA_TEST_STUDIO_TOKEN'
+
+/**
+ * The skip names WHAT IS ACTUALLY MISSING, which is not the same list every time.
+ *
+ * This used to say `set TESSERA_TEST_DATABASE_URL, TESSERA_TEST_STUDIO_URL and
+ * TESSERA_TEST_STUDIO_TOKEN` however it was run, and in CI the first of those three is SET — the
+ * shared workflow provisions this service's Postgres and exports it, and the other 146 tests here
+ * run against it. What is absent in a per-service job is a LIVE micro-studio on a port and a
+ * service token for it, and no per-service job has either.
+ *
+ * Saying otherwise cost something concrete: `micro-org`'s test step fails a run whose output
+ * contains `set <SERVICE>_TEST_DATABASE_URL`, because a database suite that skips silently is how
+ * fifteen services once reported green without running a database assertion. That guard is correct
+ * and it stays — this file simply must not claim a missing database it can see is present.
+ *
+ * The DSN clause is still emitted VERBATIM — the words `set TESSERA_TEST_DATABASE_URL`, which is
+ * the string the guard matches — whenever the DSN really is the thing that is missing. Rewording
+ * that case so the guard stopped matching would be turning the guard off, which is the defect this
+ * estate keeps finding rather than a fix for it.
+ */
+const missing: readonly string[] = [
+  ...(enabled ? [] : ['set TESSERA_TEST_DATABASE_URL (the name must contain "test")']),
+  ...(studioUrl ? [] : ['set TESSERA_TEST_STUDIO_URL — a running micro-studio']),
+  ...(studioToken ? [] : ['set TESSERA_TEST_STUDIO_TOKEN — service:tessera, studio:read+studio:write']),
+]
+const skip = live ? false : `this live test cannot run: ${missing.join('; ')}`
 
 let sql: postgres.Sql
 

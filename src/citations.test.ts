@@ -30,6 +30,25 @@
  * `micro-studio` may not be checked out. `t.skip()` marks the test skipped in the runner's summary;
  * `return` marks it GREEN. Six tests in this estate returned early and reported passes for work
  * they never did, and `testsupport.ts` opens with the same warning about database preconditions.
+ *
+ * ── Why `@cloudsforge/ui/cite` is loaded through a computed specifier ─────────────────────────
+ *
+ * **Because a literal one failed both CI jobs, and the first honest run of them is what said so.**
+ * `@cloudsforge/ui` is a devDependency spelled `link:../ui/packages/ui`, and the reusable service
+ * workflow checks out exactly two siblings — `micro-runtime` and `micro-contracts`. `micro-ui` is
+ * not among them and no named build context carries it into the image, so in CI that link is a
+ * DANGLING symlink: `pnpm install --frozen-lockfile` is green, and then `tsc` resolves the import
+ * statement — which it does whether or not the import ever executes — and fails
+ * `TS2307: Cannot find module '@cloudsforge/ui/cite'` in the build job AND inside the Dockerfile.
+ *
+ * A computed specifier is not resolved by `tsc`, so the surface used here is declared below and
+ * checked at run time by {@link citeModule}, which names the export that moved rather than failing
+ * later as `undefined is not a function`. `micro-indexer` reached the same place from the same
+ * evidence (`fix(chainbacking): a literal cross-repo specifier broke the estate's image`).
+ *
+ * The load is DEFERRED to the point of use, not merely computed: this file's tests already skip
+ * when `micro-studio` is absent, and a checkout without studio is a checkout without ui. So in CI
+ * the module is never imported, and in a full estate checkout it is imported and asserted.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
@@ -38,10 +57,52 @@ import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { block, cite, type Anchor } from '@cloudsforge/ui/cite'
 
 const REPO = dirname(fileURLToPath(import.meta.url))
 const STUDIO = resolve(REPO, '..', '..', 'studio', 'src')
+
+/* ------------------------------------------------------------------ the cite helper */
+
+/** What may be pinned on: a literal substring, or a pattern. Neither may match twice. */
+type Anchor = string | RegExp
+
+/** Exactly the surface this file drives, as `ui/packages/ui/dist/cite.d.ts` declares it. */
+interface Citation {
+  readonly file: string
+  /** The one line that matched, 1-based, so it can be printed as `path:line`. */
+  readonly line: number
+  readonly text: string
+  readonly lines: readonly string[]
+}
+interface CiteModule {
+  /** The one line of `file` matching `anchor`; throws on zero matches and on two. */
+  cite(file: string, anchor: Anchor): Citation
+  /** `count` lines of the file starting at the citation, joined. */
+  block(citation: Citation, count: number): string
+}
+
+/** Not written as a literal: see the header. `tsc` resolves a literal specifier, and cannot. */
+const CITE_MODULE = '@cloudsforge/ui/cite'
+
+let loaded: CiteModule | null = null
+
+/**
+ * Load `@cloudsforge/ui/cite` and prove it still exports what is declared above.
+ *
+ * The check is what makes a computed specifier acceptable: `tsc` cannot see the package, so this
+ * does at run time what it would have done at build time, and says which export moved.
+ */
+async function citeModule(): Promise<CiteModule> {
+  if (loaded) return loaded
+  const module = (await import(CITE_MODULE)) as Record<string, unknown>
+  for (const name of ['cite', 'block'] as const) {
+    if (typeof module[name] !== 'function') {
+      throw new Error(`@cloudsforge/ui/cite no longer exports a function named ${name}`)
+    }
+  }
+  loaded = module as unknown as CiteModule
+  return loaded
+}
 
 interface Pin {
   /** The file under `studio/src/`. */
@@ -115,11 +176,12 @@ function studioPresent(): boolean {
   return existsSync(join(STUDIO, 'server.ts'))
 }
 
-test('every studio line this repository cites is the line it claims', (t: TestContext) => {
+test('every studio line this repository cites is the line it claims', async (t: TestContext) => {
   if (!studioPresent()) {
     t.skip(`${STUDIO} is not checked out — these citations cannot be resolved`)
     return
   }
+  const { cite } = await citeModule()
   assert.ok(PINS.length > 0, 'no citations are pinned, so this test asserts nothing')
   for (const pin of PINS) {
     const found = cite(join(STUDIO, pin.file), pin.anchor)
@@ -136,11 +198,12 @@ test('every studio line this repository cites is the line it claims', (t: TestCo
  * The claim the `c2pa` pin is actually making. The interface is what is pinned; that the field
  * lives INSIDE it is the thing the prose asserts, and it is checked rather than assumed.
  */
-test('c2pa is a field of studio\'s Asset, which is why this service reads null', (t: TestContext) => {
+test('c2pa is a field of studio\'s Asset, which is why this service reads null', async (t: TestContext) => {
   if (!studioPresent()) {
     t.skip(`${STUDIO} is not checked out — this citation cannot be resolved`)
     return
   }
+  const { block, cite } = await citeModule()
   const asset = cite(join(STUDIO, 'assets.ts'), 'export interface Asset {')
   // 18 lines: `export interface Asset {` through its closing brace at :63.
   const body = block(asset, 18)

@@ -19,14 +19,13 @@
 import { hostname } from 'node:os'
 
 /**
- * The service's own name. A constant rather than a variable: it is a property of the repository,
- * not of the deployment, and making it configurable is how two services end up sharing a
- * migration advisory lock.
+ * The service's own name, from `service.ts` and NOT re-exported from here.
  *
- * It is also the `producer` on every outbox envelope and the first segment of every topic, both
- * of which `contracts-events` checks, so a rename here is a contract change.
+ * This module exits the process when a variable is missing, at import, on purpose. So anything
+ * that wants only the service's name must not have to import this file to get it — four modules
+ * did, and it took eleven test files down with them. `service.ts` has the whole account.
  */
-export const SERVICE = 'tessera'
+import { SERVICE } from './service.ts'
 
 /**
  * The port this service binds, stated once.

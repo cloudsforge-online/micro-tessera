@@ -18,7 +18,7 @@ import { TOPICS, TOPIC_NAMES, isRegisteredTopic, topicsProducedBy } from '@cloud
 import { SCOPES, SCOPE_NAMES, isLiveScope } from '@cloudsforge/contracts-auth'
 import { CONSUMED, PRODUCED, keyedBy, versionOf } from './topics.ts'
 import { DEMANDED, PROVISION_SCOPE, READ_SCOPE, WRITE_SCOPE } from './scopes.ts'
-import { SERVICE } from './env.ts'
+import { SERVICE } from './service.ts'
 import { stripComments, stripQuotedProse } from './testsupport.ts'
 
 test('every topic this service produces is registered, and the registry agrees it is ours', () => {

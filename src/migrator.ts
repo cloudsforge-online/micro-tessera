@@ -11,7 +11,8 @@
 import postgres from 'postgres';
 import { migrate, type Sql } from '@cloudsforge/db';
 import { Logger } from '@cloudsforge/telemetry';
-import { SERVICE, env } from './env.ts';
+import { env } from './env.ts'
+import { SERVICE } from './service.ts'
 import { BASELINE_VERSION, MIGRATIONS } from './migrations.ts';
 
 const log = new Logger({
