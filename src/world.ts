@@ -630,6 +630,28 @@ export async function openContest(sql: Db, input: ContestInput): Promise<{ conte
   return withOutbox(sql, async (tx, emit) => {
     await ensureAccount(tx, input.challengerSubject)
     try {
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      // THE OWNER IS READ FIRST, `for update`, AND THAT IS WHAT MAKES THIS EVENT NOTIFIABLE.
+      //
+      // `notify/src/topics.ts:299` records this topic as `blockedBy: 'no-subject'`, and it was
+      // right: the payload named the CHALLENGER and nothing else, so a rule built on it would
+      // answer `no_recipient` for ever, or — worse — tell the challenger that somebody's ground
+      // had gone fallow. The person who needs this notification is the OWNER, who is about to
+      // lose ground and has thirty days to do something about it, and the owner appeared nowhere.
+      //
+      // Read from the authoritative row rather than derived from the actor, and read `for update`
+      // so a transfer committing alongside this cannot make the event name a former owner. That
+      // is the same lock `moveParcel` takes, in the same order, so the two serialise rather than
+      // deadlock. `market.offer.made` is the estate's precedent for both halves: it named the
+      // offerer when the notification was for the seller, and was only fixable once the seller
+      // was read from the row held `for update`.
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      const owners = await tx<{ owner_subject: string; ward_id: string }[]>`
+        select owner_subject, ward_id from parcels where id = ${input.parcelId} for update
+      `
+      const parcel = owners[0]
+      if (!parcel) throw new WorldError('not_found', 'no such parcel', 404)
+
       const rows = await tx<{ id: string; parcel_id: string }[]>`
         insert into contests (parcel_id, challenger_subject)
         values (${input.parcelId}, ${input.challengerSubject})
@@ -644,7 +666,11 @@ export async function openContest(sql: Db, input: ContestInput): Promise<{ conte
         key: row.parcel_id,
         payload: {
           parcelId: row.parcel_id,
+          wardId: parcel.ward_id,
           contestId: row.id,
+          // The party this event is ABOUT: whoever is losing ground. First field of the pair on
+          // purpose — a consumer reading positionally still reaches the right one.
+          ownerSubject: parcel.owner_subject,
           challengerSubject: input.challengerSubject,
         },
         actor: `user:${input.challengerSubject.slice('user:'.length)}`,
@@ -683,49 +709,101 @@ export interface TransferInput {
  * legal transfer takes.
  */
 export async function transferParcel(sql: Db, input: TransferInput): Promise<Parcel> {
-  return withOutbox(sql, async (tx, emit) => {
-    await ensureAccount(tx, input.toSubject)
-    const before = await tx<{ owner_subject: string }[]>`
-      select owner_subject from parcels where id = ${input.parcelId} for update
+  try {
+    return await withOutbox(sql, async (tx, emit) => moveParcel(tx, emit, input))
+  } catch (err) {
+    throw translateTransferError(err)
+  }
+}
+
+/**
+ * The refusals a transfer can meet, as answers rather than as faults.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * THIS IS APPLIED OUTSIDE `withOutbox`, AND THAT IS THE WHOLE CORRECTION.
+ *
+ * It used to live INSIDE the transaction callback — a `try` around the UPDATE — and its Deed Slot
+ * branch had therefore **never executed once**. `tessera_deed_slots_bound_holdings` is a DEFERRED
+ * constraint trigger: it raises at COMMIT, which happens when `sql.begin` resolves, which is after
+ * the callback has already returned. So the branch was unreachable code that read as a refusal
+ * being handled, and what actually left this function was a raw `PostgresError` — a 500 on the
+ * trade path and, on the contest path, an unexplained dead-lettered job.
+ *
+ * Found by writing the test rather than by reading the branch, which is the point: the branch
+ * looked right. `claimParcel` has always had this correct (`translateClaimError` at `:449`, caught
+ * outside its own `withOutbox`), and its comment says why — "the deferred triggers raise at COMMIT
+ * with no constraint name attached". That comment was two functions away from the code that
+ * needed it.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export function translateTransferError(err: unknown): unknown {
+  if (err instanceof WorldError) return err
+  const message = err instanceof Error ? err.message : String(err)
+  if (message.includes('is not tradeable')) {
+    return new WorldError('homestead_is_not_tradeable', message, 409)
+  }
+  if (message.includes('Deed Slots')) {
+    return new WorldError('recipient_out_of_deed_slots', message, 409)
+  }
+  return err
+}
+
+/**
+ * One transfer, one implementation.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * `resolveContest` USED TO CARRY ITS OWN COPY OF THIS, AND THE COPY WAS MISSING TWO REFUSALS.
+ *
+ * The two functions were the same UPDATE, the same lock and the same event — except that this one
+ * translates `parcels_homestead_guard` and the Deed Slot cap into named 409s and the copy did not.
+ * So a contest resolution that would have pushed the challenger past twelve Deed Slots threw a raw
+ * `PostgresError` out of a LEASED JOB, where the only symptom is `jobs_failed_total` climbing and
+ * a parcel that quietly never changes hands: the same "a refusal answered as a fault" shape as the
+ * 500 on provision, in a third place and with no customer to notice it.
+ *
+ * Consolidating also settles what `transferParcel` was: not a missing call site — the effect it
+ * describes happens in production every time a contest resolves — but a SECOND implementation of
+ * one thing, which is why nothing called it. It has a caller now, and the `reason: 'trade'` arm
+ * remains reachable the day a parcel trade route exists.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function moveParcel(tx: Tx, emit: Emit, input: TransferInput): Promise<Parcel> {
+  await ensureAccount(tx, input.toSubject)
+  const before = await tx<{ owner_subject: string }[]>`
+    select owner_subject from parcels where id = ${input.parcelId} for update
+  `
+  const from = before[0]?.owner_subject
+  if (!from) throw new WorldError('not_found', 'no such parcel', 404)
+  try {
+    const rows = await tx<ParcelRow[]>`
+      update parcels
+         set owner_subject = ${input.toSubject}, last_edit_at = now()
+       where id = ${input.parcelId} and status = 'held'
+      returning ${tx.unsafe(PARCEL_COLUMNS)}
     `
-    const from = before[0]?.owner_subject
-    if (!from) throw new WorldError('not_found', 'no such parcel', 404)
-    try {
-      const rows = await tx<ParcelRow[]>`
-        update parcels
-           set owner_subject = ${input.toSubject}, last_edit_at = now()
-         where id = ${input.parcelId} and status = 'held'
-        returning ${tx.unsafe(PARCEL_COLUMNS)}
-      `
-      const row = rows[0]
-      if (!row) throw new WorldError('not_found', 'no such parcel, or it is not held', 404)
-      const parcel = toParcel(row, new Date())
-      emit({
-        topic: PARCEL_TRANSFERRED,
-        key: parcel.id,
-        payload: {
-          parcelId: parcel.id,
-          wardId: parcel.wardId,
-          fromSubject: from,
-          toSubject: input.toSubject,
-          reason: input.reason,
-          tier: parcel.tier,
-        },
-        actor: input.actor,
-        correlationId: input.correlationId,
-      })
-      return parcel
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      if (message.includes('is not tradeable')) {
-        throw new WorldError('homestead_is_not_tradeable', message, 409)
-      }
-      if (message.includes('Deed Slots')) {
-        throw new WorldError('recipient_out_of_deed_slots', message, 409)
-      }
-      throw err
-    }
-  })
+    const row = rows[0]
+    if (!row) throw new WorldError('not_found', 'no such parcel, or it is not held', 404)
+    const parcel = toParcel(row, new Date())
+    emit({
+      topic: PARCEL_TRANSFERRED,
+      key: parcel.id,
+      payload: {
+        parcelId: parcel.id,
+        wardId: parcel.wardId,
+        fromSubject: from,
+        toSubject: input.toSubject,
+        reason: input.reason,
+        tier: parcel.tier,
+      },
+      actor: input.actor,
+      correlationId: input.correlationId,
+    })
+    return parcel
+  } catch (err) {
+    // The IMMEDIATE refusals only. The deferred one cannot be seen from in here at all — see
+    // `translateTransferError`, which both callers apply outside their transaction.
+    throw translateTransferError(err)
+  }
 }
 
 /**
@@ -739,45 +817,31 @@ export async function resolveContest(
   contestId: string,
   correlationId: string,
 ): Promise<Parcel> {
-  return withOutbox(sql, async (tx, emit) => {
-    const rows = await tx<{ parcel_id: string; challenger_subject: string }[]>`
-      update contests set status = 'won', resolved_at = now()
-       where id = ${contestId} and status = 'open'
-      returning parcel_id, challenger_subject
-    `
-    const contest = rows[0]
-    if (!contest) throw new WorldError('not_found', 'no such open contest', 404)
-    const before = await tx<{ owner_subject: string }[]>`
-      select owner_subject from parcels where id = ${contest.parcel_id} for update
-    `
-    const from = before[0]?.owner_subject
-    if (!from) throw new WorldError('not_found', 'the parcel is gone', 404)
-    await ensureAccount(tx, contest.challenger_subject)
-    const moved = await tx<ParcelRow[]>`
-      update parcels
-         set owner_subject = ${contest.challenger_subject}, last_edit_at = now()
-       where id = ${contest.parcel_id} and status = 'held'
-      returning ${tx.unsafe(PARCEL_COLUMNS)}
-    `
-    const row = moved[0]
-    if (!row) throw new WorldError('not_found', 'the parcel is no longer held', 404)
-    const parcel = toParcel(row, new Date())
-    emit({
-      topic: PARCEL_TRANSFERRED,
-      key: parcel.id,
-      payload: {
-        parcelId: parcel.id,
-        wardId: parcel.wardId,
-        fromSubject: from,
+  try {
+    return await withOutbox(sql, async (tx, emit) => {
+      const rows = await tx<{ parcel_id: string; challenger_subject: string }[]>`
+        update contests set status = 'won', resolved_at = now()
+         where id = ${contestId} and status = 'open'
+        returning parcel_id, challenger_subject
+      `
+      const contest = rows[0]
+      if (!contest) throw new WorldError('not_found', 'no such open contest', 404)
+      // The one implementation, so this path gets the refusals its own copy was missing. See
+      // `moveParcel` and `translateTransferError`.
+      return moveParcel(tx, emit, {
+        parcelId: contest.parcel_id,
         toSubject: contest.challenger_subject,
         reason: 'contest',
-        tier: parcel.tier,
-      },
-      actor: 'system',
-      correlationId,
+        correlationId,
+        actor: 'system',
+      })
     })
-    return parcel
-  })
+  } catch (err) {
+    // Outside the transaction, because the Deed Slot cap is deferred to COMMIT. A resolution that
+    // leaks a raw PostgresError here dead-letters the `parcel.settle` job with no sentence saying
+    // why, and the parcel silently never changes hands.
+    throw translateTransferError(err)
+  }
 }
 
 /** Flag a parcel a Venue, a Workshop, or open its gate. §6.4's six kinds of space. */

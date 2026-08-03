@@ -517,6 +517,26 @@ export async function bookVenue(sql: Db, input: BookInput): Promise<{ bookingId:
   try {
     return await withOutbox(sql, async (tx, emit) => {
       await ensureAccount(tx, input.bookedBy)
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      // THE PARTY BEING PAID, READ `for update` BEFORE THE BOOKING IS WRITTEN.
+      //
+      // `notify/src/topics.ts:308` records this topic as `blockedBy: 'no-subject'` and it was
+      // right: the payload named the BOOKER, and the person who needs telling that their venue
+      // has been booked — and whose money is on the other end of `reservation_id` — is the
+      // parcel's OWNER, who appeared nowhere in it. A rule written on the old payload would have
+      // answered `no_recipient` for ever, or told the booker about their own booking.
+      //
+      // Read from the authoritative row, not derived from the actor, and `for update` so a
+      // transfer committing alongside cannot make this name the former owner — which on a topic
+      // that carries a price and a reservation would be telling the wrong person they are owed
+      // money. Locked in the same order `moveParcel` locks, so the two serialise.
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      const owners = await tx<{ owner_subject: string; ward_id: string }[]>`
+        select owner_subject, ward_id from parcels where id = ${input.parcelId} for update
+      `
+      const parcel = owners[0]
+      if (!parcel) throw new WorldError('not_found', 'no such parcel', 404)
+
       const rows = await tx<{ id: string; parcel_id: string; slot: Date }[]>`
         insert into bookings (parcel_id, slot, booked_by, price_wei, reservation_id)
         values (${input.parcelId}, ${input.slot}, ${input.bookedBy},
@@ -543,7 +563,10 @@ export async function bookVenue(sql: Db, input: BookInput): Promise<{ bookingId:
         payload: {
           bookingId: row.id,
           parcelId: row.parcel_id,
+          wardId: parcel.ward_id,
           slot: row.slot.toISOString(),
+          // The party this event is ABOUT, and the one being paid. First of the pair on purpose.
+          ownerSubject: parcel.owner_subject,
           bookedBy: input.bookedBy,
           priceWei: input.priceWei.toString(),
           reservationId: input.reservationId,

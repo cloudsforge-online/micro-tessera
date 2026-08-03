@@ -43,6 +43,7 @@ import {
   listFallow,
   listParcelsOf,
   openContest,
+  resolveContest,
   transferParcel,
   WorldError,
 } from './world.ts'
@@ -333,6 +334,30 @@ test('a contest before the window is refused on the DATABASE clock, not the call
   })
   assert.ok(contest.contestId)
 
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // THE FALLOW EVENT NAMES THE OWNER LOSING GROUND, NOT THE CHALLENGER TAKING IT.
+  //
+  // `notify/src/topics.ts:299` records this topic `blockedBy: 'no-subject'`, and it was right:
+  // the payload carried `challengerSubject` and nothing else. The person who needs telling — and
+  // who has thirty days to do something about it — is the OWNER, who was absent entirely.
+  //
+  // Alice owns and Bob challenges, so this is asserted as a difference: a payload that derived
+  // the owner from the actor would satisfy a presence check and name exactly the wrong person.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  const fallowed = await sql<{ key: string; payload: Record<string, unknown> }[]>`
+    select key, payload from outbox where topic = 'tessera.parcel.fallowed'
+  `
+  assert.equal(fallowed.length, 1)
+  assert.equal(fallowed[0]?.key, id, 'keyed by the parcel, not the contest')
+  assert.equal(fallowed[0]?.payload['ownerSubject'], ALICE_SUBJECT)
+  assert.equal(fallowed[0]?.payload['challengerSubject'], BOB_SUBJECT)
+  assert.notEqual(
+    fallowed[0]?.payload['ownerSubject'],
+    fallowed[0]?.payload['challengerSubject'],
+    'the owner was derived from the actor rather than read from the parcel',
+  )
+  assert.equal(fallowed[0]?.payload['contestId'], contest.contestId)
+
   // A Homestead is never contestable, however old it is.
   const home = await sql<{ id: string }[]>`
     insert into parcels (ward_id, owner_subject, tier, origin_x, origin_y, size, claimed_at)
@@ -348,6 +373,58 @@ test('a contest before the window is refused on the DATABASE clock, not the call
       }),
     (err: unknown) => err instanceof WorldError && err.code === 'homestead_is_never_contestable',
   )
+})
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * A CONTEST RESOLUTION IS A TRANSFER, AND IT USED TO BE A SECOND COPY OF ONE.
+ *
+ * `resolveContest` carried its own inline UPDATE, identical to `transferParcel`'s except that it
+ * translated NEITHER of the two constraints `transferParcel` translates. So a resolution that
+ * would push the challenger past twelve Deed Slots threw a raw `PostgresError` out of the
+ * `parcel.settle` LEASED JOB — where the only symptoms are `jobs_failed_total` climbing and a
+ * parcel that silently never changes hands. There is no customer on that path to notice, which is
+ * why it is worth a test rather than a comment.
+ *
+ * Both functions now share `moveParcel`. This grades the refusal the copy did not have.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+test('resolving a contest for a challenger out of Deed Slots is a named refusal, not a raw error', { skip }, async () => {
+  const ward = await seedWard(sql)
+  await seedAccounts(sql, ALICE_SUBJECT, BOB_SUBJECT)
+  const rows = await sql<{ id: string }[]>`
+    insert into parcels (ward_id, owner_subject, tier, origin_x, origin_y, size, claimed_at)
+    values (${ward}, ${ALICE_SUBJECT}, 'plot', 0, 0, 32, now() - interval '121 days') returning id
+  `
+  const id = rows[0]!.id
+  const contest = await openContest(asDb(sql), {
+    parcelId: id,
+    challengerSubject: BOB_SUBJECT,
+    correlationId: 'r',
+  })
+
+  // Bob already holds his two. Taking a third by contest is the case the cap must still bite on:
+  // §7.3's ceiling is "at any price", and winning ground is not a purchase but it is an acquisition.
+  await sql`insert into parcels (ward_id, owner_subject, tier, origin_x, origin_y, size)
+            values (${ward}, ${BOB_SUBJECT}, 'plot', 64, 0, 32)`
+  await sql`insert into parcels (ward_id, owner_subject, tier, origin_x, origin_y, size)
+            values (${ward}, ${BOB_SUBJECT}, 'plot', 96, 0, 32)`
+
+  await assert.rejects(
+    () => resolveContest(asDb(sql), contest.contestId, 'r'),
+    (err: unknown) => err instanceof WorldError && err.code === 'recipient_out_of_deed_slots',
+    'a contest resolution past the Deed Slot cap threw a raw PostgresError out of a leased job',
+  )
+
+  // The ground did not move, and no transfer was announced.
+  const still = await sql<{ owner_subject: string }[]>`
+    select owner_subject from parcels where id = ${id}
+  `
+  assert.equal(still[0]?.owner_subject, ALICE_SUBJECT)
+  const events = await sql<{ n: number }[]>`
+    select count(*)::int as n from outbox where topic = 'tessera.parcel.transferred'
+  `
+  assert.equal(events[0]?.n, 0)
 })
 
 test('the fallow set is computed on read — no sweep wrote it, and the two clocks agree', { skip }, async () => {

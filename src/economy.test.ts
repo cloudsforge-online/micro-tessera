@@ -440,6 +440,26 @@ test('a venue booking needs a venue, an escrow hold, and an unbooked slot', { sk
   assert.equal(events.length, 1)
   assert.equal(events[0]?.key, parcelId)
   assert.notEqual(events[0]?.key, booked.bookingId)
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // THE PAYLOAD NAMES THE OWNER, AND THAT IS THE ONLY REASON A NOTIFY RULE CAN EXIST.
+  //
+  // `notify/src/topics.ts:308` records this topic `blockedBy: 'no-subject'`. The payload named
+  // the BOOKER, so the party whose venue was taken and whose money is on the other end of
+  // `reservationId` was absent — a rule on it answers `no_recipient` for ever, or tells Bob about
+  // Bob's own booking.
+  //
+  // Asserted as a DIFFERENCE, not just presence: Alice owns, Bob books, and a payload that
+  // derived the owner from the actor would pass a `typeof === 'string'` check and be wrong.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  assert.equal(events[0]?.payload['ownerSubject'], ALICE_SUBJECT)
+  assert.equal(events[0]?.payload['bookedBy'], BOB_SUBJECT)
+  assert.notEqual(
+    events[0]?.payload['ownerSubject'],
+    events[0]?.payload['bookedBy'],
+    'the owner was derived from the actor rather than read from the parcel',
+  )
+  assert.equal(events[0]?.payload['wardId'], ward)
 })
 
 test('an engagement grant cannot be recorded without naming its ledger entry', { skip }, async () => {
