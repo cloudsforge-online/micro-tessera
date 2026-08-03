@@ -1300,6 +1300,150 @@ export const MIGRATIONS: readonly Migration[] = [
       exception when duplicate_object then null; end $$;
     `,
   },
+
+  {
+    version: 11,
+    name: 'market_reconciliation_and_ward_governance',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- WHAT MICRO-MARKET ACTUALLY AGREED TO, RECORDED SO IT CAN BE CHECKED RATHER THAN TRUSTED.
+      --
+      -- Tessera snapshots its terms at draft time and \`listings_one_rate_for_everybody\` proves
+      -- they match \`platform_terms\`. That proves a claim about THIS database. It says nothing
+      -- about the terms the listing is actually sold under, because the sale happens in
+      -- micro-market against ITS snapshot, taken from ITS environment
+      -- (\`market/src/server.ts:731\` — \`platformFeeBps: waived ? 0 : deps.platformFeeBps\`).
+      --
+      -- Two databases, two snapshots, one claim: "the platform fee and the royalty cap are
+      -- identical for every account, and no SKU, tier or subscription reduces either" (§7.2's
+      -- fifth refusal). Until now that claim spanned a gap nothing measured.
+      --
+      -- These three columns close it. They hold what market ANSWERED, and the CHECKs below make
+      -- disagreement unrepresentable rather than logged. That is the difference between the
+      -- property being asserted and being proved: a per-account fee cannot be stored, so it
+      -- cannot have happened.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      alter table listings add column if not exists market_seller_subject   text;
+      alter table listings add column if not exists market_platform_fee_bps integer;
+      alter table listings add column if not exists market_royalty_bps      integer;
+
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      -- THE CREATOR IS THE SELLER, AND THIS IS THE CONSTRAINT THAT SAYS SO.
+      --
+      -- \`market/src/server.ts:681\` takes the seller from the TOKEN — \`subjectOf(principal)\`,
+      -- which answers \`service:<name>\` for a service principal (\`:1486\`) — and market has no
+      -- \`x-user-id\` lane, unlike aetherholm, emberkin, nda, wallet and this service. So a
+      -- listing created with TESSERA_SERVICE_CREDENTIAL is a listing whose seller is the literal
+      -- string \`service:tessera\`, and \`market/src/orders.ts:388\` credits sale proceeds to
+      -- \`subject: listing.sellerSubject\`.
+      --
+      -- The creator would be paid nothing, and NOTHING WOULD LOOK WRONG: the listing is valid,
+      -- the sale settles, the trial balance is correct, every test passes. That is the exact
+      -- shape of failure this estate keeps shipping, so it is refused here rather than in the
+      -- client that must remember to relay the right token — because a handler-only guard is
+      -- bypassed by a bug, a migration, and an operator with a psql connection.
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      do $$ begin
+        alter table listings add constraint listings_market_agrees_on_the_seller
+          check (market_seller_subject is null or market_seller_subject = seller_subject);
+      exception when duplicate_object then null; end $$;
+
+      -- One rate, in both databases. A fee discount converts money into compounding earning
+      -- advantage, which is why §7.2 refuses it and why this is a CHECK and not a log line.
+      do $$ begin
+        alter table listings add constraint listings_market_agrees_on_the_rate
+          check (market_platform_fee_bps is null or market_platform_fee_bps = platform_fee_bps);
+      exception when duplicate_object then null; end $$;
+
+      do $$ begin
+        alter table listings add constraint listings_market_agrees_on_the_royalty
+          check (market_royalty_bps is null or market_royalty_bps = royalty_bps);
+      exception when duplicate_object then null; end $$;
+
+      -- The three above are vacuous while the columns are null, so this is the half that makes
+      -- them bite: a listing that is no longer a draft has been to market and must have brought
+      -- market's answer back. Together they say — in the schema, for every row, for ever — that
+      -- a live Tessera listing is one whose seller and whose terms micro-market agrees with.
+      --
+      -- Deliberately the same shape as \`listings_active_names_its_market_row\` above rather than
+      -- a new one: both are "past draft implies market has been consulted", and two different
+      -- spellings of one rule is how the two drift apart.
+      do $$ begin
+        alter table listings add constraint listings_past_draft_records_market_terms
+          check (
+            status = 'draft'
+            or (market_seller_subject is not null
+                and market_platform_fee_bps is not null
+                and market_royalty_bps is not null)
+          );
+      exception when duplicate_object then null; end $$;
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- WARD GOVERNANCE: ONE COMMUNITY, ONE WARD, AND IT DOES NOT MOVE.
+      --
+      -- \`community_id\` has been nullable text since migration 3 and nothing constrained it. Two
+      -- things about it are load-bearing and neither was enforced.
+      --
+      -- 1. IT IS A UUID. \`inbound.ts\` applies an executed ward proposal with
+      --    \`update wards set name = ... where community_id = <payload.communityId>\`. A row
+      --    holding a slug, or a URN, or a trimmed id, simply never matches — the ward silently
+      --    stops being governable and the only symptom is a proposal that executes in community
+      --    and does nothing here. §11's own warning about events that "succeed and are invisible".
+      --
+      -- 2. AT MOST ONE WARD PER COMMUNITY. That same UPDATE has no LIMIT, so two wards sharing a
+      --    community means one \`parameter_change\` renames BOTH. A partial unique index is what
+      --    makes "the ward this community governs" a singular phrase — the same form
+      --    \`tessera_one_homestead\` uses, and for the same reason: a partial unique index
+      --    survives a bug, a backfill and a second replica, where a handler check does not.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      do $$ begin
+        alter table wards add constraint wards_community_id_is_a_uuid
+          check (
+            community_id is null
+            or community_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          );
+      exception when duplicate_object then null; end $$;
+
+      create unique index if not exists tessera_one_ward_per_community
+        on wards (community_id) where community_id is not null;
+
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      -- A WARD'S GOVERNANCE IS NOT RE-POINTABLE.
+      --
+      -- Re-pointing a bound ward at a different community transfers who governs it, to everybody
+      -- already holding a parcel there, without a vote in either community. It is the one edit to
+      -- this column that is never a correction.
+      --
+      -- BEFORE UPDATE and IMMEDIATE, not a constraint trigger: the fact is fully decided by the
+      -- row being written, so deferring to commit buys nothing and only widens the window in
+      -- which other statements in the transaction have acted on a value that will be rolled back.
+      -- Migration 4's \`parcels_no_second_homestead\` makes the same call for the same reason.
+      --
+      -- Unbinding (to null) is allowed: a community that is deleted or archived must be able to
+      -- leave, and a ward with no community is the state every ward is minted in.
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      create or replace function tessera_ward_governance_does_not_move() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if old.community_id is not null
+           and new.community_id is not null
+           and new.community_id <> old.community_id then
+          raise exception
+            'ward % is already governed by community %; re-pointing it at % would transfer who governs it without a vote in either community',
+            old.id, old.community_id, new.community_id
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists wards_governance_does_not_move on wards;
+      create trigger wards_governance_does_not_move
+        before update on wards
+        for each row execute function tessera_ward_governance_does_not_move();
+    `,
+  },
 ]
 
 /**

@@ -177,6 +177,16 @@ export interface Env {
   /** `micro-market`'s origin, for listings. Same optionality. */
   readonly marketUrl: string | undefined
   /**
+   * `micro-community`'s origin, for ward governance. Same optionality.
+   *
+   * **No credential accompanies it, and that is deliberate rather than missing.** Community's
+   * `POST /v1/communities` refuses a service token — "accepting one would make every service in
+   * the estate a voting member of every community" — and takes the owner from the caller's own
+   * token. So the only credential that works is the founding operator's, relayed per request, and
+   * there is nothing for this service to hold or rotate.
+   */
+  readonly communityUrl: string | undefined
+  /**
    * The credential this service exchanges for a service token when it calls studio, ledger or
    * market. Optional for the same reason the three URLs are; `requiredSecret` when present, so a
    * placeholder credential cannot boot.
@@ -213,6 +223,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     studioUrl: optionalOrigin(source, 'STUDIO_URL'),
     ledgerUrl: optionalOrigin(source, 'LEDGER_URL'),
     marketUrl: optionalOrigin(source, 'MARKET_URL'),
+    communityUrl: optionalOrigin(source, 'COMMUNITY_URL'),
     serviceCredential: credential ? requiredSecret(source, 'TESSERA_SERVICE_CREDENTIAL') : undefined,
   }
 }

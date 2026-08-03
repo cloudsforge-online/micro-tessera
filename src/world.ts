@@ -239,6 +239,75 @@ export async function findWard(sql: Db, idOrSlug: string): Promise<Ward | null> 
   return row ? toWard(row) : null
 }
 
+/**
+ * Bind a ward to the `micro-community` community that governs it.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **THIS IS THE WHOLE OF TESSERA'S GOVERNANCE CODE, AND IT MUST STAY THAT WAY.**
+ *
+ * §10: "a design that expected community to *enact* a world change would have needed a new
+ * execution kind and a new handler in somebody else's repo. Putting the effect in Tessera keeps
+ * the change count in `micro-community` at zero and puts the game logic in the game."
+ *
+ * So Tessera stores one id. It has no proposals table, no votes table, no tally, no quorum, no
+ * timelock and no treasury, because `micro-community` has all seven and a second implementation of
+ * any of them would be a second answer to "who decided this". The decisions arrive as
+ * `community.proposal.executed` and `inbound.ts` applies them.
+ *
+ * **A conditional UPDATE rather than a read-then-write.** `where community_id is null` makes the
+ * binding a compare-and-set: two founders racing produce one binding and one 409, decided by the
+ * row lock rather than by whichever request read first. `tessera_one_ward_per_community` (migration
+ * 11) then makes the other direction singular too — one community governs at most one ward, which
+ * is what makes `inbound.ts`'s unqualified `update wards ... where community_id = $1` affect
+ * exactly one row rather than every ward that happened to share a community.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export async function bindWardCommunity(
+  sql: Db,
+  wardId: string,
+  communityId: string,
+): Promise<Ward> {
+  let rows: WardRow[]
+  try {
+    rows = await sql<WardRow[]>`
+      update wards set community_id = ${communityId}
+       where id = ${wardId} and community_id is null
+      returning id, slug, name, archetype, ordinal, claimable_tiles, claimed_tiles, community_id,
+                instances, opened_at
+    `
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (message.includes('tessera_one_ward_per_community')) {
+      throw new WorldError(
+        'community_governs_another_ward',
+        'that community already governs a ward — one community, one ward, or a single proposal ' +
+          'would decide for both',
+        409,
+      )
+    }
+    if (message.includes('wards_community_id_is_a_uuid')) {
+      throw new WorldError('bad_community_id', 'a community id is a uuid', 400)
+    }
+    throw err
+  }
+  const row = rows[0]
+  if (!row) {
+    // Either the ward does not exist or it is already governed. Distinguished, because "you
+    // cannot found a second government for this ward" and "no such ward" are different answers
+    // and a founder needs to know which they are reading.
+    const existing = await sql<{ community_id: string | null }[]>`
+      select community_id from wards where id = ${wardId}
+    `
+    if (!existing[0]) throw new WorldError('not_found', 'no such ward', 404)
+    throw new WorldError(
+      'already_governed',
+      `that ward is already governed by community ${existing[0].community_id}`,
+      409,
+    )
+  }
+  return toWard(row)
+}
+
 export interface OpenWardInput {
   readonly slug: string
   readonly name: string

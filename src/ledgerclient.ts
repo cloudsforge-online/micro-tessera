@@ -29,6 +29,7 @@
 
 import { HttpClient } from '@cloudsforge/http'
 import {
+  CLEARING,
   accountKey,
   assertBalanced,
   engagementSubject,
@@ -38,6 +39,7 @@ import {
   type Actor,
   type LedgerAssetCode,
   type Posting,
+  type TokenAssetCode,
 } from '@cloudsforge/contracts-money'
 import { ASSET } from './sparks.ts'
 import { ENGAGEMENT_ACCOUNT, GRANT_ENTRY_KIND, AVAILABLE, PAYOUT_DUE } from './economy.ts'
@@ -351,5 +353,107 @@ export async function releasePayout(
     correlationId: input.correlationId,
     idempotencyKey: input.idempotencyKey,
     postings: releasePostings(input.subject, input.amountWei),
+  })
+}
+
+/* ------------------------------------------------------------------------- issuing an object */
+
+/**
+ * The creator's title to their own object.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **AN OBJECT MUST BE LEDGER-RESERVABLE BEFORE IT CAN BE SOLD, AND THAT IS SOMEBODY ELSE'S
+ * CONSTRAINT.**
+ *
+ * §8.5's last line: "The one constraint that binds is `listings_active_is_escrowed`
+ * (`market/src/migrations.ts:289-293`): an active listing must hold an escrow, so a Tessera object
+ * must be ledger-reservable under an `item_asset_code` before it can go live."
+ *
+ * Market's activation does exactly that — `market/src/listings.ts` `activateListing` calls
+ * `holdEscrow` with `kind: 'listing_item'`, `subject: listing.sellerSubject`, `assetCode:
+ * listing.itemAssetCode`, `amount: listing.quantity`, moving the item from the seller's
+ * `available` to `reserved`. If the creator holds none, the ledger's no-overdraft trigger refuses
+ * and the listing cannot activate. So Tessera issues the object to its author FIRST.
+ *
+ * **`liability`, because the platform owes the creator their object.** The same type and the same
+ * `available` purpose `holder()` uses for their EMBER, for the same reason — it is theirs, held
+ * custodially.
+ *
+ * **The counterparty is `clearing`, and it is the only type that may go negative.**
+ * `ledger_assert_no_overdraft` returns early for `acct.type = 'clearing'` under the comment "A
+ * clearing account nets to zero over a settled period and may legitimately sit either side of zero
+ * within one" (`ledger/src/migrations.ts`, the `balances_no_overdraft` trigger). `equity` is NOT
+ * exempt, which is the whole of §8.3's safety property for EMBER grants and is exactly why the
+ * engagement account cannot be reused here: an issuance account MUST go negative, because the
+ * negative is the count of that object in circulation.
+ *
+ * `clearing` is a SINGLETON subject spelled by the contract (`CLEARING`,
+ * `contracts/packages/money/src/index.ts`), not a new one invented here. The account key is
+ * `(subject, assetCode, purpose)` and the asset code is unique per object, so `clearing /
+ * TOKEN:cf:tessera:object:<hex> / treasury` is a distinct account per object that sits at exactly
+ * `-1` once the object is issued. An operator reading `-1` is reading "one of this object exists".
+ *
+ * **No service in the estate had written a `TOKEN:` balance before this one**, which was verified
+ * rather than assumed, and is why every field is cited: there is no prior spelling to match, so
+ * this is the one that the next service will have to match. `ledger/src/accounts.ts` throws on a
+ * `type` mismatch against an existing account and whichever service posts second has EVERY entry
+ * refused.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+
+/** One object is one indivisible unit. Not wei — a `TOKEN:` item has no decimals. */
+export const ONE_OBJECT = 1n
+
+/** The creator's holding of their own object. `liability`: the platform owes it to them. */
+export function objectHolder(subject: string, assetCode: TokenAssetCode): AccountRef {
+  const canonical = subject.startsWith('user:')
+    ? userSubject(subject.slice('user:'.length))
+    : subject
+  return { subject: canonical, assetCode, purpose: AVAILABLE, type: 'liability' }
+}
+
+/** The issuance counterparty. `clearing`, which is the only type permitted to go negative. */
+export function objectIssuer(assetCode: TokenAssetCode): AccountRef {
+  return { subject: CLEARING, assetCode, purpose: 'treasury', type: 'clearing' }
+}
+
+/**
+ * The two postings that bring an object into the ledger.
+ *
+ * Exported separately from the call so `economy.test.ts` can assert the SHAPE — that the credit
+ * side is the AUTHOR and that the debit side is a `clearing` account rather than the `equity` one
+ * — without a ledger being up.
+ */
+export function issuePostings(author: string, assetCode: TokenAssetCode): readonly PostingRequest[] {
+  return [
+    { account: objectIssuer(assetCode), direction: 'debit', amount: ONE_OBJECT, assetCode, sequence: 0 },
+    { account: objectHolder(author, assetCode), direction: 'credit', amount: ONE_OBJECT, assetCode, sequence: 1 },
+  ]
+}
+
+/**
+ * Issue one object to its author.
+ *
+ * **Idempotent on the object itself**, which is what makes this safe to call on every activation
+ * attempt rather than once: the key is derived from the asset code, so a creator who lists,
+ * withdraws and relists holds exactly one of their object rather than one per attempt. The ledger
+ * answers the second call from its stored response and posts nothing (`market/src/ledgerclient.ts`
+ * uses derived keys for the same reason, and `escrow.ts:18-21` calls it the second of three
+ * independent defences).
+ *
+ * There is deliberately no "check the balance first". A check-then-post is a race, and the post is
+ * already the check.
+ */
+export async function issueObjectToAuthor(
+  ledger: LedgerClient,
+  input: { author: string; assetCode: TokenAssetCode; correlationId: string },
+): Promise<{ id: string; replayed: boolean }> {
+  return ledger.postEntry({
+    kind: 'item_issue',
+    actor: 'system',
+    correlationId: input.correlationId,
+    idempotencyKey: `tessera:issue:${input.assetCode}`,
+    postings: issuePostings(input.author, input.assetCode),
+    metadata: { programme: SERVICE, itemAssetCode: input.assetCode },
   })
 }

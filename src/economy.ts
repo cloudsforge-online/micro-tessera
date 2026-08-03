@@ -29,13 +29,20 @@
  * never a recorded payment that never happened.
  */
 
-import { ENGAGEMENT_GRANT_KIND, engagementAccount, type AccountIdentity } from '@cloudsforge/contracts-money'
+import {
+  ENGAGEMENT_GRANT_KIND,
+  engagementAccount,
+  type AccountIdentity,
+  type TokenAssetCode,
+} from '@cloudsforge/contracts-money'
 import type { Db } from './outbox.ts'
 import { withOutbox } from './outbox.ts'
 import { VENUE_BOOKED } from './topics.ts'
 import { ASSET, parsePriceWei, splitSale, type SaleSplit } from './sparks.ts'
 import { ensureAccount, WorldError } from './world.ts'
 import { SERVICE } from './env.ts'
+import { objectAssetCode, objectUrn } from './itemasset.ts'
+import type { MarketClient } from './marketclient.ts'
 
 /**
  * The account every grant debits. **`engagement:tessera`, `EMBER`, and an `equity` type.**
@@ -73,6 +80,19 @@ export interface Listing {
   readonly createdAt: string
   /** What the seller will actually receive, computed the way market computes it. `sparks.ts`. */
   readonly split: SaleSplit
+  /**
+   * What `micro-market` answered, and therefore the terms this listing will actually be SOLD
+   * under. Null while the listing is a draft; after that, CHECKed equal to the three fields above
+   * by migration 11. See `activateListing`.
+   */
+  readonly marketTerms: MarketTerms | null
+}
+
+/** Market's own snapshot, brought back so it can be compared rather than assumed. */
+export interface MarketTerms {
+  readonly sellerSubject: string
+  readonly platformFeeBps: number
+  readonly royaltyBps: number
 }
 
 interface ListingRow {
@@ -86,10 +106,14 @@ interface ListingRow {
   readonly market_listing_id: string | null
   readonly status: string
   readonly created_at: Date
+  readonly market_seller_subject: string | null
+  readonly market_platform_fee_bps: number | null
+  readonly market_royalty_bps: number | null
 }
 
 const LISTING_COLUMNS = `id, object_id, seller_subject, price_wei::text as price_wei, royalty_bps,
-  platform_fee_bps, settlement_mode, market_listing_id, status, created_at`
+  platform_fee_bps, settlement_mode, market_listing_id, status, created_at,
+  market_seller_subject, market_platform_fee_bps, market_royalty_bps`
 
 export function toListing(row: ListingRow): Listing {
   // `::text` then `BigInt`, never a JSON number — `market/src/escrow.ts:100-102` reads amounts the
@@ -112,6 +136,16 @@ export function toListing(row: ListingRow): Listing {
       platformFeeBps: row.platform_fee_bps,
       royaltyBps: row.royalty_bps,
     }),
+    marketTerms:
+      row.market_seller_subject !== null &&
+      row.market_platform_fee_bps !== null &&
+      row.market_royalty_bps !== null
+        ? {
+            sellerSubject: row.market_seller_subject,
+            platformFeeBps: row.market_platform_fee_bps,
+            royaltyBps: row.market_royalty_bps,
+          }
+        : null,
   }
 }
 
@@ -206,20 +240,233 @@ export async function draftListing(sql: Db, input: DraftListingInput): Promise<L
   }
 }
 
-/** Bind a draft to the micro-market listing it became. */
+/* ------------------------------------------------------------------------------- activation */
+
+export interface ActivateDeps {
+  readonly market: MarketClient
+  /**
+   * Issues one of the object to its author in the ledger. `ledgerclient.ts:issueObjectToAuthor`.
+   *
+   * **Injected rather than imported, and that is a real hazard rather than a style preference.**
+   * `ledgerclient.ts` already imports THIS module for `ENGAGEMENT_ACCOUNT`, `AVAILABLE` and
+   * `PAYOUT_DUE`, and it reads `ENGAGEMENT_ACCOUNT` at module-evaluation time to build
+   * `ENGAGEMENT_REF`. A runtime import back from here would close that cycle, and whichever of the
+   * two modules loaded first would evaluate the other's body against bindings still in their
+   * temporal dead zone — a `ReferenceError` on the import graph, at boot, in the composition root,
+   * for a service that typechecks perfectly. So the dependency travels as a function.
+   */
+  readonly issueObject: (input: {
+    readonly author: string
+    readonly assetCode: TokenAssetCode
+    readonly correlationId: string
+  }) => Promise<unknown>
+}
+
+export interface ActivateListingInput {
+  readonly listingId: string
+  /** The authenticated seller. Never read from a body — it decides who gets paid. */
+  readonly sellerSubject: string
+  /**
+   * The seller's OWN bearer token, relayed to market.
+   *
+   * Not a service credential, and the reason is the whole of `marketclient.ts`'s header: market
+   * takes the seller from the token and has no on-behalf-of lane, so a service credential would
+   * create a listing selling the creator's object into Tessera's own ledger account.
+   */
+  readonly sellerToken: string
+  readonly correlationId: string
+}
+
+/**
+ * Prove that market's terms are the platform's one set of terms.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **THIS IS WHERE "IDENTICAL FOR EVERY ACCOUNT" STOPS BEING AN ASSERTION.**
+ *
+ * §7.2's fifth refusal is the sharpest thing in the design's monetisation section, because the
+ * argument is economic rather than aesthetic: a fee discount is not a cosmetic perk, it converts
+ * money into a compounding earning advantage, so it is pay-to-win with an accountant. The refusal
+ * therefore has to be true of the terms a sale ACTUALLY happens under, and those live in
+ * micro-market's database, not this one.
+ *
+ * Three separate things now have to agree, and each is checked by something that cannot be talked
+ * out of it:
+ *
+ *   1. **Tessera's row matches Tessera's singleton.** `listings_one_rate_for_everybody`, a trigger
+ *      reading `platform_terms` — which has no subject column and a
+ *      `platform_terms_is_a_singleton` CHECK, so there is exactly one rate to match.
+ *   2. **Tessera never asks market for a rate.** `marketclient.ts` sends no `platformFeeBps`
+ *      field, and market reads its own from `deps.platformFeeBps` (`market/src/server.ts:731`).
+ *      The absence is asserted against a literal key list in `marketclient.test.ts`.
+ *   3. **Market's answer matches Tessera's row.** This function, on every activation, for every
+ *      account — and then `listings_market_agrees_on_the_rate` in migration 11, so a row that
+ *      disagreed could not be stored even if this function were deleted.
+ *
+ * (1) and (2) are properties of this repository. (3) is the only one that is a property of the
+ * SALE, and it is the one that was missing.
+ *
+ * The refusal is deliberately BEFORE activation. A market listing left as a draft holds nothing
+ * and is "visible to nobody but their seller" (`market/src/listings.ts`), so refusing here leaves
+ * a dead draft; refusing after would leave a live listing Tessera disowns.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export function assertTermsAreIdentical(
+  ours: { readonly platformFeeBps: number; readonly royaltyBps: number; readonly sellerSubject: string },
+  theirs: MarketTerms,
+): void {
+  if (theirs.sellerSubject !== ours.sellerSubject) {
+    throw new WorldError(
+      'market_seller_mismatch',
+      `micro-market recorded the seller as ${theirs.sellerSubject} but this listing belongs to ` +
+        `${ours.sellerSubject}. Sale proceeds are credited to market's seller, so activating this ` +
+        'would pay somebody else for this creator\'s object.',
+      409,
+    )
+  }
+  if (theirs.platformFeeBps !== ours.platformFeeBps) {
+    throw new WorldError(
+      'market_rate_mismatch',
+      `micro-market would take ${theirs.platformFeeBps}bps on this sale but the platform take is ` +
+        `${ours.platformFeeBps}bps. The rate is identical for every account and no SKU reduces it, ` +
+        'so a listing that would sell under a different rate is not activated.',
+      409,
+    )
+  }
+  if (theirs.royaltyBps !== ours.royaltyBps) {
+    throw new WorldError(
+      'market_royalty_mismatch',
+      `micro-market recorded a ${theirs.royaltyBps}bps royalty but this listing sets ` +
+        `${ours.royaltyBps}bps. The royalty is snapshotted so it cannot be re-cut mid-sale.`,
+      409,
+    )
+  }
+}
+
+/**
+ * Turn a draft into a listing another player can actually buy.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **THE ORDER OF THE FOUR STEPS IS THE SUBSTANCE OF THIS FUNCTION.**
+ *
+ *     issue → create → CHECK THE TERMS → activate → record
+ *
+ * * **Issue first.** §8.5's last line: "an active listing must hold an escrow, so a Tessera object
+ *   must be ledger-reservable under an `item_asset_code` before it can go live". Market's
+ *   activation reserves the item (`market/src/listings.ts`, `holdEscrow` with
+ *   `kind: 'listing_item'`), and a creator who holds none has the reservation refused by the
+ *   ledger's no-overdraft trigger. Issuing is idempotent on the object's own asset code, so a
+ *   creator who lists, withdraws and relists holds exactly one of their object.
+ *
+ * * **Check the terms between create and activate**, for the reason in
+ *   `assertTermsAreIdentical`: a market draft holds nothing, a market active listing does.
+ *
+ * * **Record last.** Every external fact is established before this database claims it, which is
+ *   the same ordering rule `recordGrant` follows and doc 21 §7.4 states. A crash before the write
+ *   leaves a live market listing and a Tessera draft — visible, converging on retry (market's POST
+ *   is deduped on this listing's id and `activate` treats "already active" as success), and the
+ *   safe direction. The unsafe direction — a Tessera row claiming to be live against a listing
+ *   market never activated — is additionally unrepresentable, because
+ *   `listings_active_names_its_market_row` refuses it.
+ *
+ * There is no transaction spanning the HTTP calls, deliberately. Holding a Postgres transaction
+ * open across three upstream round trips is a lock held for as long as the slowest of them, and
+ * the ordering above is what makes it unnecessary: every step is idempotent and the recovery
+ * direction is the safe one.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
 export async function activateListing(
   sql: Db,
-  listingId: string,
-  marketListingId: string,
+  deps: ActivateDeps,
+  input: ActivateListingInput,
 ): Promise<Listing> {
-  const rows = await sql<ListingRow[]>`
-    update listings set status = 'active', market_listing_id = ${marketListingId}
-     where id = ${listingId} and status = 'draft'
-    returning ${sql.unsafe(LISTING_COLUMNS)}
+  const rows = await sql<(ListingRow & { checksum: string | null; author_subject: string })[]>`
+    select ${sql.unsafe(LISTING_COLUMNS.split(',').map((c) => `l.${c.trim()}`).join(', '))},
+           o.checksum, o.author_subject
+      from listings l join objects o on o.id = l.object_id
+     where l.id = ${input.listingId}
   `
   const row = rows[0]
-  if (!row) throw new WorldError('not_found', 'no such draft listing', 404)
-  return toListing(row)
+  if (!row) throw new WorldError('not_found', 'no such listing', 404)
+  // The seller is checked HERE as well as at market. Market would refuse it too
+  // (`market/src/listings.ts` compares `listing.sellerSubject`), but a service that let somebody
+  // activate another player's draft would be relaying a token to do it.
+  if (row.seller_subject !== input.sellerSubject) throw new WorldError('not_found', 'no such listing', 404)
+  if (row.status !== 'draft') {
+    throw new WorldError('not_a_draft', `a ${row.status} listing cannot be activated`, 409)
+  }
+  if (!row.checksum) {
+    // Unreachable through `draftListing`, which refuses an object that is not `fired`, and
+    // `objects_fired_have_bytes` refuses a fired object with no checksum. Stated rather than
+    // assumed because the object's name IS its checksum and a null here would build `TOKEN:null`.
+    throw new WorldError('not_fired', 'an object must finish firing before it can be listed', 409)
+  }
+
+  const assetCode = objectAssetCode(row.checksum)
+  const itemUrn = objectUrn(row.checksum)
+
+  // 1. The creator holds their own object, so market has something to reserve.
+  await deps.issueObject({
+    // The AUTHOR, not the seller. They are the same today because only an author can draft a
+    // listing for their object; naming the author is what keeps that true if resale is ever added,
+    // since the object is issued once, to whoever made it.
+    author: row.author_subject,
+    assetCode,
+    correlationId: input.correlationId,
+  })
+
+  // 2. The market listing. Created as a draft — market's own `status` starts at `draft` and
+  //    `activateListing` is the only path to `active` (`market/src/listings.ts`).
+  const created = await deps.market.createListing({
+    itemUrn,
+    itemAssetCode: assetCode,
+    priceWei: parsePriceWei(row.price_wei, 'price_wei'),
+    royaltyBps: row.royalty_bps,
+    sellerToken: input.sellerToken,
+    idempotencyKey: row.id,
+    correlationId: input.correlationId,
+  })
+
+  // 3. The proof. Before anything goes live.
+  assertTermsAreIdentical(
+    {
+      platformFeeBps: row.platform_fee_bps,
+      royaltyBps: row.royalty_bps,
+      sellerSubject: row.seller_subject,
+    },
+    created,
+  )
+
+  // 4. Live.
+  const active = await deps.market.activate({
+    marketListingId: created.id,
+    sellerToken: input.sellerToken,
+    correlationId: input.correlationId,
+  })
+  // Re-checked against the ACTIVATED listing, not only the created one. Market re-reads the row
+  // under `for update` when it activates, so this is the answer describing the listing that is
+  // actually on sale.
+  assertTermsAreIdentical(
+    {
+      platformFeeBps: row.platform_fee_bps,
+      royaltyBps: row.royalty_bps,
+      sellerSubject: row.seller_subject,
+    },
+    active,
+  )
+
+  const updated = await sql<ListingRow[]>`
+    update listings
+       set status = 'active',
+           market_listing_id = ${active.id},
+           market_seller_subject = ${active.sellerSubject},
+           market_platform_fee_bps = ${active.platformFeeBps},
+           market_royalty_bps = ${active.royaltyBps}
+     where id = ${input.listingId} and status = 'draft'
+    returning ${sql.unsafe(LISTING_COLUMNS)}
+  `
+  const after = updated[0]
+  if (!after) throw new WorldError('not_a_draft', 'the listing changed state under this activation', 409)
+  return toListing(after)
 }
 
 /** Consume `market.listing.sold`. The money moved in market's ledger entry; this records the fact. */

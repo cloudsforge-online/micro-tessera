@@ -64,6 +64,7 @@ import {
   openContest,
   setParcelFlags,
   WorldError,
+  type Ward,
 } from './world.ts'
 import {
   FACINGS,
@@ -77,7 +78,14 @@ import {
   type Facing,
   type Footprint,
 } from './kiln.ts'
-import { draftListing, findListing, listListingsOf, platformTerms } from './economy.ts'
+import {
+  draftListing,
+  findListing,
+  listListingsOf,
+  platformTerms,
+  type ActivateListingInput,
+  type Listing,
+} from './economy.ts'
 import { lightBeacon, rankParcels, recordVisit } from './discovery.ts'
 import { arrive, depart, whoIsIn, type PresenceHub } from './presence.ts'
 import { TITLE_DESCRIPTOR, provision } from './titlecontract.ts'
@@ -97,6 +105,26 @@ export interface ServerDeps {
   /** True when a Kiln upstream is configured. Absent is a supported mode — see `env.ts`. */
   readonly kilnConfigured?: boolean
   readonly enqueueFiring?: (objectId: string, subject: string) => Promise<void>
+  /**
+   * The market seam. Absent when `MARKET_URL` is unset, which is a supported mode: without it
+   * `POST /v1/listings/:id/activate` answers 503 and everything else — including drafting a
+   * listing — still works. A world you cannot sell in is still a world you can build in.
+   */
+  readonly market?: {
+    activate(input: ActivateListingInput): Promise<Listing>
+  }
+  /**
+   * The ward-governance seam. Absent when `COMMUNITY_URL` is unset, same optionality: a ward with
+   * no community is the state every ward is minted in, so an unconfigured upstream removes a
+   * route rather than the world.
+   */
+  readonly governance?: {
+    found(input: {
+      readonly ward: Ward
+      readonly founderToken: string
+      readonly correlationId: string
+    }): Promise<Ward>
+  }
   /**
    * Refresh sampled gauges immediately before `/metrics` renders. Queue depth is a value that
    * must be read, not counted, and reading it on a timer would be the one `setInterval` in this
@@ -629,6 +657,53 @@ function buildRoutes(): Route[] {
       return { status: 201, body: { listing: serialiseListing(listing) } }
     }),
 
+    /**
+     * Draft → live. The moment a creator's object becomes something another player can buy.
+     *
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * **THE SELLER'S OWN TOKEN IS REQUIRED, AND A SERVICE PRINCIPAL IS REFUSED HERE RATHER THAN
+     * QUIETLY SUBSTITUTED.**
+     *
+     * Every other write route in this service accepts a service token that names its user in
+     * `x-user-id` (`requireUser`). This one cannot, and the reason is `micro-market`'s source:
+     * `POST /v1/listings` takes the seller from the token (`market/src/server.ts:681`,
+     * `subjectOf` at `:1486`) and market has no on-behalf-of lane. A service credential would
+     * therefore create a listing whose seller is `service:tessera`, and market credits sale
+     * proceeds to its own `sellerSubject` (`market/src/orders.ts:388`) — so the creator would be
+     * paid nothing while every test passed.
+     *
+     * The honest answer is a 403 that says so. Silently listing under the wrong subject is the
+     * failure; refusing to is not a limitation to apologise for.
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     */
+    define('POST', '/v1/listings/:id/activate', async (ctx, deps) => {
+      const principal = await authenticate(ctx, deps)
+      if (principal.kind !== 'user') {
+        throw new ForbiddenError(
+          'the seller\'s own user token — micro-market takes the seller from the token and pays it',
+        )
+      }
+      const id = ctx.params['id'] ?? ''
+      if (!UUID.test(id)) throw new BadRequestError('a listing id is a uuid')
+      if (!deps.market) {
+        // Absent is a supported mode, as it is for the Kiln. A world whose market is unconfigured
+        // is one you can still walk around, build in and fire objects in; every other route works.
+        return errorReply(503, 'market_unconfigured', 'listing to micro-market is not configured', ctx.requestId)
+      }
+      // The exact bytes the seller presented. Relayed, never re-minted — this service holds no
+      // key that could mint a user token and must not behave as though it did.
+      const sellerToken = bearerFrom(headerOf(ctx.req, 'authorization'))
+      if (!sellerToken) throw new TokenError('no bearer token presented', 'missing')
+
+      const listing = await deps.market.activate({
+        listingId: id,
+        sellerSubject: `user:${subjectUserId(principal)}`,
+        sellerToken,
+        correlationId: ctx.requestId,
+      })
+      return { status: 200, body: { listing: serialiseListing(listing) } }
+    }),
+
     define('GET', '/v1/listings/:id', async (ctx, deps) => {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
@@ -649,6 +724,60 @@ function buildRoutes(): Route[] {
     }),
 
     /* ------------------------------------------------------------ presence and discovery */
+
+    /**
+     * Found the `micro-community` community that governs this ward.
+     *
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     * **A USER TOKEN, AND AN ADMIN'S — BOTH HALVES ARE FORCED BY SOMEBODY ELSE'S SOURCE.**
+     *
+     * `micro-community` refuses a service token on its governance surface, in terms worth
+     * quoting because they are right: "A service token is not 'close enough' on the governance
+     * surface. It names no user, so there is no membership to check — and accepting one would
+     * make every service in the estate a voting member of every community"
+     * (`community/src/server.ts`, `authenticateUser`). And `POST /v1/communities` takes the owner
+     * from the token, never from the body (`:547`).
+     *
+     * So Tessera cannot found a ward's community with `TESSERA_SERVICE_CREDENTIAL`, and the
+     * founder becomes the community's owner and first admin. A ward is platform-minted, so
+     * founding its government is a platform act — which makes `isAdmin` the gate, and makes the
+     * relayed token an operator's rather than any player's.
+     *
+     * What this route deliberately does NOT do is the point of it: no proposal, no vote, no
+     * officer, no timelock, no treasury. Those exist in `micro-community` and Tessera consumes
+     * their outcome as `community.proposal.executed` (`inbound.ts`). §10 — "keeps the change
+     * count in `micro-community` at zero and puts the game logic in the game."
+     * ═══════════════════════════════════════════════════════════════════════════════════════
+     */
+    define('POST', '/v1/wards/:id/community', async (ctx, deps) => {
+      const principal = await authenticate(ctx, deps)
+      if (principal.kind !== 'user') {
+        throw new ForbiddenError(
+          'a user token — micro-community refuses a service token on its governance surface',
+        )
+      }
+      if (!isAdmin(principal)) throw new ForbiddenError('role:admin')
+      const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
+      if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
+      if (!deps.governance) {
+        return errorReply(503, 'community_unconfigured', 'ward governance is not configured', ctx.requestId)
+      }
+      if (ward.communityId) {
+        // Answered before the upstream is called. Creating a community and then discovering the
+        // ward is taken would leave an orphan community owned by the operator who tried.
+        return errorReply(
+          409,
+          'already_governed',
+          `that ward is already governed by community ${ward.communityId}`,
+          ctx.requestId,
+        )
+      }
+      const founderToken = bearerFrom(headerOf(ctx.req, 'authorization'))
+      if (!founderToken) throw new TokenError('no bearer token presented', 'missing')
+
+      const bound = await deps.governance.found({ ward, founderToken, correlationId: ctx.requestId })
+      return { status: 201, body: { ward: bound } }
+    }),
 
     define('POST', '/v1/wards/:id/presence', async (ctx, deps) => {
       const { subject } = await requireUser(ctx, deps)

@@ -26,6 +26,12 @@ import { createServer, registerServiceMetrics } from './server.ts'
 import { KILN_FIRE_KIND, registerHandlers, rescheduleRecurring, seedRecurring } from './jobs.ts'
 import { createPresenceHub } from './presence.ts'
 import { createStudioClient } from './studioclient.ts'
+import { createMarketClient } from './marketclient.ts'
+import { createCommunityClient, wardCommunitySlug } from './communityclient.ts'
+import { createLedgerClient, issueObjectToAuthor } from './ledgerclient.ts'
+import { activateListing } from './economy.ts'
+import { bindWardCommunity } from './world.ts'
+import type { Db } from './outbox.ts'
 import { firingLeaseKey } from './kiln.ts'
 
 // 1. Environment. Importing `./env.ts` validated it; a missing or placeholder secret has already
@@ -135,6 +141,63 @@ if (!studio) {
   })
 }
 
+/**
+ * The market seam, and the ledger it needs.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **BOTH, OR NEITHER.** Activating a listing does two things that must both be possible: it issues
+ * the object into the creator's ledger balance, and it lists at market. Market's activation
+ * reserves the item (`market/src/listings.ts`, `holdEscrow` with `kind: 'listing_item'`), so a
+ * market configured without a ledger cannot activate anything — it would create a market draft,
+ * fail at the reserve, and leave a dead draft behind on every attempt.
+ *
+ * So the seam is constructed only when BOTH upstreams and the credential are present, and the
+ * route answers 503 otherwise. A half-configured seam that fails at step three is worse than an
+ * absent one, because the absent one says so in the answer.
+ *
+ * Note the asymmetry with the tokens, which is deliberate and is the substance of this whole
+ * feature: the LEDGER call uses this service's credential (issuing an object is the platform's
+ * act), while both MARKET calls relay the seller's own bearer token, because market takes the
+ * seller from the token and pays it. See `marketclient.ts`'s header.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+const ledger =
+  env.ledgerUrl && env.serviceCredential
+    ? createLedgerClient({
+        baseUrl: env.ledgerUrl,
+        token: async () => env.serviceCredential ?? '',
+      })
+    : undefined
+
+const market =
+  env.marketUrl && ledger
+    ? createMarketClient({ baseUrl: env.marketUrl })
+    : undefined
+
+if (!market) {
+  logger.info('no market upstream configured; listings can be drafted but not activated', {
+    marketUrl: Boolean(env.marketUrl),
+    ledgerUrl: Boolean(env.ledgerUrl),
+    credential: Boolean(env.serviceCredential),
+  })
+}
+
+/**
+ * Ward governance. `micro-community`, and nothing of it reimplemented here.
+ *
+ * No credential is held for this one, and that is not an omission: community's create route
+ * refuses a service token outright and takes the owner from the caller's own, so the only token
+ * that works is the founding operator's, relayed per request. There is nothing for this service to
+ * hold.
+ */
+const community = env.communityUrl ? createCommunityClient({ baseUrl: env.communityUrl }) : undefined
+
+if (!community) {
+  logger.info('no community upstream configured; wards cannot be given a government', {
+    communityUrl: Boolean(env.communityUrl),
+  })
+}
+
 const server = createServer({
   lifecycle,
   logger,
@@ -142,6 +205,42 @@ const server = createServer({
   verifier: new Verifier({ jwksUrl: env.identityJwksUrl, issuer: env.identityIssuer }),
   sql,
   ...(presence ? { presence } : {}),
+  ...(market && ledger
+    ? {
+        market: {
+          activate: (input) =>
+            activateListing(
+              sql as unknown as Db,
+              {
+                market,
+                // The ledger call, bound here rather than imported by `economy.ts` — see the
+                // comment on `ActivateDeps.issueObject` for the import cycle that would
+                // otherwise crash this service at boot.
+                issueObject: (issue) => issueObjectToAuthor(ledger, issue),
+              },
+              input,
+            ),
+        },
+      }
+    : {}),
+  ...(community
+    ? {
+        governance: {
+          found: async ({ ward, founderToken, correlationId }) => {
+            const created = await community.createCommunity({
+              slug: wardCommunitySlug(ward.slug),
+              name: ward.name,
+              founderToken,
+              // The WARD's id. Community dedupes the POST on it, so a retried founding creates
+              // one community rather than a second one under a slug that is already taken.
+              idempotencyKey: ward.id,
+              correlationId,
+            })
+            return bindWardCommunity(sql as unknown as Db, ward.id, created.id)
+          },
+        },
+      }
+    : {}),
   kilnConfigured: Boolean(studio),
   enqueueFiring: async (objectId, subject) => {
     // `owner:<subject>` — the same lease key shape studio uses, so one player's firings serialise
