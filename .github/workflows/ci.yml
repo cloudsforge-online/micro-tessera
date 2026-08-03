@@ -1,0 +1,88 @@
+name: CI
+
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+# THIS REPOSITORY HAD NO CI AT ALL. Nine commits, 97 tests against a real Postgres, an image built
+# and driven end to end by hand — and not one line of any of that had ever run anywhere but on the
+# machine that wrote it.
+#
+# It is a CALL rather than a bespoke file, and that is the estate's settled answer: micro-worlds'
+# 167 hand-written lines said of themselves that everything but the repository-specific rules was
+# "a liability with a deletion date". A copy here would start life 167 lines behind and drift from
+# the day it landed.
+#
+# WHAT THE SHARED WORKFLOW BRINGS THAT NOTHING HERE HAS EVER HAD:
+#
+#   * Rule 1 — this service may read ONE database variable, its own. Enforced against source.
+#   * The scope audit. Every scope a route gate demands must exist in the registry in
+#     @cloudsforge/contracts-auth, because identity refuses to mint a token naming an unknown
+#     scope: an unregistered scope is a service-to-service surface no identity-issued token can
+#     ever reach, and the suite stays green regardless because it mints its own principals. This
+#     repository gates on three — tessera:provision, tessera:read and tessera:write — and
+#     contracts-auth/src/index.ts:475-488 registers all three, with the line numbers in its own
+#     comment read off THIS repository's server.ts. That agreement has never been machine-checked.
+#   * The image job, which is the one that matters most here. See below.
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  estate:
+    uses: cloudsforge-online/micro-org/.github/workflows/service-ci.yml@main
+    with:
+      service: tessera
+      database-env-var: TESSERA_DATABASE_URL
+      # 4022, and the number is argued rather than picked — src/env.ts:35-51 and 23-tessera.md
+      # §10.1. Deliberately BELOW the derived 4100+ compose block, so no number of repositories
+      # appended to `deployableRepos()` can grow into it. `.env.example` and src/env.ts must agree
+      # with this line; they do.
+      port: 4022
+      # Match production rather than the workflow's default of 16: the estate's compose files pin
+      # postgres:17-alpine, and a suite that passes on a version nobody runs proves nothing.
+      postgres-version: '17'
+      # ── THE IMAGE IS RUN, NOT READ, AND THAT IS THE POINT OF LANDING THIS AT ALL ──
+      #
+      # This Dockerfile resolves its `link:` dependencies from TWO NAMED BUILD CONTEXTS —
+      # `COPY --from=runtimepkgs` (Dockerfile:30-31) and `COPY --from=contractspkgs` (36-37). The
+      # shared workflow checks micro-runtime and micro-contracts out as siblings and passes both as
+      # `build-contexts`, which is the only way this image builds at all outside a full estate
+      # checkout.
+      #
+      # And building it is not the assertion. micro-service-template's image could not boot for
+      # MONTHS while its CI was green, because the job read the image's metadata instead of running
+      # it. The shared job starts the container against the same Postgres the test job gets,
+      # migrates it with the image's own migrator, and reads /livez — which is why the smoke-env
+      # below has to be real.
+      #
+      # Exactly what src/env.ts:204-211 demands and nothing else. TESSERA_DATABASE_URL is supplied
+      # by the job. The two signing secrets only have to clear 24 characters and miss the
+      # PLACEHOLDERS set at env.ts:70-80 — a known placeholder is refused at boot, deliberately, so
+      # `CHANGE_ME` from .env.example would fail this job rather than pass it. The identity URLs are
+      # never dialled, because /livez verifies no token. Never a real credential.
+      #
+      # The optional upstreams — STUDIO_URL, LEDGER_URL, MARKET_URL and TESSERA_SERVICE_CREDENTIAL —
+      # are deliberately absent: `.env.example` states that ABSENT IS A SUPPORTED MODE, the Kiln
+      # answers 503 `kiln_unconfigured` and every other route works. Setting them here would test a
+      # configuration no deployment uses and hide the one this service promises to survive.
+      smoke-env: |
+        IDENTITY_JWKS_URL=http://127.0.0.1:4100/.well-known/jwks.json
+        IDENTITY_ISSUER=http://127.0.0.1:4100
+        OUTBOX_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000
+        INBOUND_SIGNING_SECRET=ci-only-not-a-real-inbound-secret-0000
+    secrets:
+      # @cloudsforge/* resolves through link:../runtime and link:../contracts rather than a
+      # registry, so the workflow checks out micro-runtime and micro-contracts as siblings. Both are
+      # private, so it needs a contents:read token.
+      estate_token: ${{ secrets.ESTATE_READ_TOKEN }}
+    permissions:
+      contents: read
+      packages: read
