@@ -567,6 +567,657 @@ export const MIGRATIONS: readonly Migration[] = [
         for each row execute function tessera_assert_deed_slots();
     `,
   },
+
+  {
+    version: 5,
+    name: 'kiln',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- OBJECTS, AND THE ANSWER TO COPYBOT — WHICH IS AN ADDRESSING SCHEME, NOT A POLICY.
+      --
+      -- §9.2: "A Tessera object IS its bytes. Re-uploading identical bytes does not create a
+      -- second object with a second owner; it resolves to the existing content address and its
+      -- existing Author of record. The forgeable \`owner\` field simply does not exist, because
+      -- ownership is derived rather than stored."
+      --
+      -- \`tessera_objects_are_their_bytes\` below is that sentence as a unique index. There is no
+      -- \`owner_subject\` column on this table at all — only \`author_subject\`, which is written
+      -- once by the firing and never updated (\`objects_authorship_is_final\`). Who may PLACE an
+      -- object is a licence question answered by \`placements\` and by micro-market's royalty;
+      -- who MADE it is a fact about the file.
+      --
+      -- What this does not solve, per §9.2 and said here so nobody reads the index as a stronger
+      -- claim than it is: IMITATION. A chair prompted to look like your chair has different bytes
+      -- and this index has nothing to say about it. What dies is cheap, automated, scalable theft.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists objects (
+        id             uuid        primary key default gen_random_uuid(),
+        author_subject text        not null references accounts (subject) on delete restrict,
+        prompt         text        not null,
+        category       text        not null,
+        footprint      text        not null,
+        status         text        not null default 'firing',
+        -- 'sha256:<64 lowercase hex>' — studio's own spelling (studio/src/assets.ts:77-79), so a
+        -- checksum copied from a studio response is the value this column holds, with no
+        -- reformatting step in between that could drop the prefix on one path and not the other.
+        checksum       text,
+        studio_asset_id text,
+        studio_status_url text,
+        -- MEASURED off the bytes by studio (studio/src/backend.ts:460, "Read from the bytes
+        -- rather than assumed"), never asserted. Nullable while firing; §2.2 records that
+        -- emberkin-assets asserts c2pa at write time and never measures it, and that a repo which
+        -- asserts it is a repo that will be wrong quietly.
+        c2pa           boolean,
+        failure_reason text,
+        anchor_tx      text,
+        anchor_block   bigint,
+        anchored_at    timestamptz,
+        created_at     timestamptz not null default now(),
+        constraint objects_status_known check (status in ('firing','fired','failed')),
+        constraint objects_footprint_known check (footprint in ('1x1','2x2')),
+        constraint objects_category_known check (category in (
+          'seating','surfaces','storage','lighting','structure','flooring',
+          'foliage','signage','machines','instruments','vehicles','ornament'
+        )),
+        constraint objects_checksum_shape check (checksum is null or checksum ~ '^sha256:[0-9a-f]{64}$'),
+        -- A fired object without a content address has no identity, which is the one thing this
+        -- design says an object always has.
+        constraint objects_fired_have_bytes check (status <> 'fired' or checksum is not null),
+        constraint objects_failed_say_why check (status <> 'failed' or failure_reason is not null),
+        -- §9.3: the anchor is a Hearth transaction or it is nothing. Half an anchor — a block
+        -- with no transaction, a timestamp with no block — is a claim the chain does not back.
+        constraint objects_anchor_is_whole check (
+          (anchor_tx is null and anchor_block is null and anchored_at is null)
+          or (anchor_tx is not null and anchor_block is not null and anchored_at is not null)
+        ),
+        constraint objects_anchor_needs_bytes check (anchor_tx is null or checksum is not null)
+      );
+
+      create unique index if not exists tessera_objects_are_their_bytes
+        on objects (checksum) where checksum is not null;
+
+      create index if not exists objects_author_idx on objects (author_subject, created_at desc);
+
+      -- Authorship is written once. An UPDATE that re-points it is the forgeable owner field
+      -- coming back in through a different column, and it is the single edit that would undo §9.2.
+      create or replace function tessera_guard_authorship() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if new.author_subject is distinct from old.author_subject then
+          raise exception
+            'object % has an author of record — authorship is a fact about the file (23-tessera.md §9.2)',
+            old.id
+            using errcode = 'check_violation';
+        end if;
+        -- The bytes are the identity, so re-pointing a fired object at different bytes is
+        -- creating a different object while keeping the first one's provenance and sales.
+        if old.checksum is not null and new.checksum is distinct from old.checksum then
+          raise exception
+            'object % is addressed by its bytes — they do not change', old.id
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists objects_authorship_is_final on objects;
+      create trigger objects_authorship_is_final
+        before update on objects
+        for each row execute function tessera_guard_authorship();
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- PLACEMENTS, AND TWO FACINGS RATHER THAN FOUR.
+      --
+      -- §2.1: "One canonical facing per object. The second facing is a horizontal mirror applied
+      -- at render time, not a second asset. This is not laziness, it is forced: micro-studio has
+      -- no \`seed\` column (studio/src/migrations.ts:154-252) ... A pipeline that cannot fix a seed
+      -- cannot render the same chair four times."
+      --
+      -- The CHECK is a two-value enum, so the day studio stores a seed the change is a migration
+      -- that widens it and not a hunt for every place four facings were assumed.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists placements (
+        id         uuid        primary key default gen_random_uuid(),
+        parcel_id  uuid        not null references parcels (id) on delete cascade,
+        object_id  uuid        not null references objects (id) on delete restrict,
+        x          integer     not null,
+        y          integer     not null,
+        facing     text        not null default 'canonical',
+        placed_by  text        not null references accounts (subject) on delete restrict,
+        placed_at  timestamptz not null default now(),
+        constraint placements_facing_is_one_of_two check (facing in ('canonical','mirrored')),
+        constraint placements_within_parcel check (x >= 0 and y >= 0 and x < 128 and y < 128)
+      );
+
+      create index if not exists placements_parcel_idx on placements (parcel_id);
+      create index if not exists placements_object_idx on placements (object_id);
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- THE OBJECT CAP, CHECKED AT COMMIT.
+      --
+      -- §12's test 6: "Placing past the object cap is refused at commit by the deferred trigger,
+      -- including via a bulk paste that is individually under the cap and collectively over it."
+      --
+      -- DEFERRED is the whole design of this one. §11.6: "Placements may not exceed the parcel's
+      -- cap, checked \`deferrable initially deferred\` at commit — so pasting 200 objects is one
+      -- check, not 200." An immediate per-row trigger would run the count 200 times and would
+      -- still be correct; deferring makes it one count, and — more importantly — makes a paste
+      -- that is legal only as a whole (place 200, remove 200, place 200) legal, which an
+      -- immediate check would refuse depending on statement order.
+      --
+      -- The cap comes from \`parcels.object_cap\`, which is a GENERATED column, so there is no
+      -- value here that money could have moved. §6.2.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create or replace function tessera_assert_object_cap() returns trigger
+        language plpgsql
+      as $$
+      declare
+        placed integer;
+        cap    integer;
+        target uuid;
+      begin
+        target := coalesce(new.parcel_id, old.parcel_id);
+        select object_cap into cap from parcels where id = target;
+        -- The parcel may have been deleted later in the same transaction; a cascade took the
+        -- placements with it and there is nothing left to be over the cap of.
+        if cap is null then
+          return null;
+        end if;
+        select count(*) into placed from placements where parcel_id = target;
+        if placed > cap then
+          raise exception
+            'parcel % holds % placements but its object cap is % — the cap is a rendering budget and is not purchasable (23-tessera.md §6.2)',
+            target, placed, cap
+            using errcode = 'check_violation';
+        end if;
+        return null;
+      end;
+      $$;
+
+      drop trigger if exists placements_within_object_cap on placements;
+      create constraint trigger placements_within_object_cap
+        after insert or update on placements
+        deferrable initially deferred
+        for each row execute function tessera_assert_object_cap();
+
+      -- A placement on a parcel is an edit, and an edit resets the fallow clock. Doing it here
+      -- rather than in the handler means every path that places an object — route, job, backfill
+      -- — resets the clock, which is what makes "no visitor and no edit for 90 days" a statement
+      -- about the parcel rather than about one code path.
+      create or replace function tessera_touch_parcel_edit() returns trigger
+        language plpgsql
+      as $$
+      begin
+        update parcels set last_edit_at = now()
+         where id = coalesce(new.parcel_id, old.parcel_id) and status = 'held';
+        return null;
+      end;
+      $$;
+
+      drop trigger if exists placements_touch_parcel on placements;
+      create trigger placements_touch_parcel
+        after insert or delete on placements
+        for each row execute function tessera_touch_parcel_edit();
+    `,
+  },
+
+  {
+    version: 6,
+    name: 'economy',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- THE TAKE IS THE SAME FOR EVERYBODY, AND THAT IS A SINGLETON ROW PLUS A TRIGGER.
+      --
+      -- §7.2's fifth refusal, which is the condition the entire no-pay-to-win argument rests on:
+      -- "The platform fee and the royalty cap are identical for every account, and no SKU, tier or
+      -- subscription reduces either. A subscription that cut your marketplace fee would convert
+      -- money directly into structural earning advantage over every creator who did not buy it —
+      -- which is compound, permanent, and exactly the thing §7.1 forbids."
+      --
+      -- One row, forced by \`platform_terms_is_a_singleton\`. Every listing's fee is checked
+      -- against it by a trigger rather than defaulted from it, because a DEFAULT is a suggestion:
+      -- a caller that supplies its own value overrides a default silently and is refused by a
+      -- trigger loudly.
+      --
+      -- The numbers are micro-market's, not new ones: MARKET_PLATFORM_FEE_BPS defaults to 250 and
+      -- MARKET_MAX_ROYALTY_BPS to 1000 (market/src/env.ts:183-184). A second set of rates would be
+      -- a second answer to "what does the platform take", which is the question §7.2 needs to have
+      -- exactly one answer to.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists platform_terms (
+        singleton        boolean     primary key default true,
+        platform_fee_bps integer     not null,
+        max_royalty_bps  integer     not null,
+        updated_at       timestamptz not null default now(),
+        constraint platform_terms_is_a_singleton check (singleton = true),
+        constraint platform_terms_fee_in_range check (platform_fee_bps between 0 and 10000),
+        constraint platform_terms_royalty_in_range check (max_royalty_bps between 0 and 10000),
+        -- market/src/env.ts:193-198 refuses boot if the two sum to >= 10000. The same refusal,
+        -- one layer down, so a row written by anything at all cannot express it.
+        constraint platform_terms_leave_the_seller_something
+          check (platform_fee_bps + max_royalty_bps < 10000)
+      );
+
+      insert into platform_terms (singleton, platform_fee_bps, max_royalty_bps)
+      values (true, 250, 1000)
+      on conflict (singleton) do nothing;
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- LISTINGS. Tessera's half of a micro-market sale: the terms, snapshotted, before market
+      -- ever sees them.
+      --
+      -- \`price_wei\` is numeric(78,0) — ledger/src/migrations.ts:215 chose 78 digits "because 78
+      -- digits holds any uint256", and EMBER is 18 decimals of a uint256. Read as ::text and
+      -- turned into a bigint in TypeScript, never a JSON number: Number.MAX_SAFE_INTEGER is about
+      -- 9e15 and a single EMBER is 1e18 wei.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists listings (
+        id               uuid          primary key default gen_random_uuid(),
+        object_id        uuid          not null references objects (id) on delete restrict,
+        seller_subject   text          not null references accounts (subject) on delete restrict,
+        price_wei        numeric(78,0) not null,
+        royalty_bps      integer       not null,
+        platform_fee_bps integer       not null,
+        settlement_mode  text          not null default 'custodial',
+        market_listing_id text         unique,
+        status           text          not null default 'draft',
+        created_at       timestamptz   not null default now(),
+
+        -- §8.1: "every in-world price is stored in wei and carries CHECK (price_wei %
+        -- 1000000000000 = 0) — no price finer than one Spark." A Spark is the floor, in the
+        -- database rather than in a validator, so a price of 1 wei is not a rounding decision
+        -- somebody has to remember to make.
+        constraint tessera_price_whole_sparks check (price_wei % ${WEI_PER_SPARK_SQL} = 0),
+        constraint tessera_price_not_negative check (price_wei >= 0),
+
+        -- ─────────────────────────────────────────────────────────────────────────────────────
+        -- EVERY TESSERA LISTING IS CUSTODIAL, WITHOUT EXCEPTION — §8.5, and it is not a
+        -- preference.
+        --
+        -- "The royalty is enforced ONLY on the custodial settlement path — market/src/orders.ts:
+        -- 299-345 builds the ledger entry inside \`if (listing.settlementMode === 'custodial')\`,
+        -- and the \`else\` branch merely demands an \`onchainTransactionId\`. For an \`onchain\`
+        -- listing the royalty is recorded on the order row and NEVER POSTED."
+        --
+        -- So an onchain Tessera listing is a listing whose royalty is a number in a database and
+        -- nothing else, which is the reference's copybot grievance with extra steps. A CHECK
+        -- rather than a default, for the reason above: a default is a suggestion.
+        -- ─────────────────────────────────────────────────────────────────────────────────────
+        constraint tessera_listings_are_custodial check (settlement_mode = 'custodial'),
+        constraint listings_status_known check (status in ('draft','active','sold','withdrawn')),
+        constraint listings_royalty_not_negative check (royalty_bps >= 0),
+        constraint listings_terms_leave_the_seller_something
+          check (royalty_bps + platform_fee_bps < 10000),
+        -- An active listing names the market listing it became. Without this a Tessera row can
+        -- claim to be live while micro-market has never heard of it.
+        constraint listings_active_names_its_market_row
+          check (status = 'draft' or market_listing_id is not null)
+      );
+
+      create index if not exists listings_seller_idx on listings (seller_subject, created_at desc);
+      create index if not exists listings_object_idx on listings (object_id);
+
+      create or replace function tessera_assert_one_rate_for_everybody() returns trigger
+        language plpgsql
+      as $$
+      declare
+        t record;
+      begin
+        select platform_fee_bps, max_royalty_bps into t from platform_terms where singleton;
+        if t is null then
+          raise exception 'platform terms are unset — no listing may be priced'
+            using errcode = 'check_violation';
+        end if;
+        if new.platform_fee_bps <> t.platform_fee_bps then
+          raise exception
+            'listing % takes %bps but the platform take is %bps — the rate is identical for every account, and no SKU reduces it (23-tessera.md §7.2)',
+            new.id, new.platform_fee_bps, t.platform_fee_bps
+            using errcode = 'check_violation';
+        end if;
+        if new.royalty_bps > t.max_royalty_bps then
+          raise exception
+            'listing % sets a %bps royalty but the cap is %bps — the cap is identical for every account',
+            new.id, new.royalty_bps, t.max_royalty_bps
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists listings_one_rate_for_everybody on listings;
+      create trigger listings_one_rate_for_everybody
+        before insert or update on listings
+        for each row execute function tessera_assert_one_rate_for_everybody();
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- VENUE BOOKINGS. §6.4 — a Venue is "a parcel flagged for events; gains Beacon rights and a
+      -- bookable calendar", and a booking is "an escrowed ledger hold" (§5).
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists bookings (
+        id             uuid          primary key default gen_random_uuid(),
+        parcel_id      uuid          not null references parcels (id) on delete cascade,
+        slot           timestamptz   not null,
+        booked_by      text          not null references accounts (subject) on delete restrict,
+        price_wei      numeric(78,0) not null,
+        -- The ledger reservation that holds the money. §8.2: reserving funds is a posting from
+        -- \`available\` to \`reserved\`, "two accounts, not two columns" (ledger/src/accounts.ts:9).
+        reservation_id text,
+        status         text          not null default 'open',
+        created_at     timestamptz   not null default now(),
+        constraint bookings_status_known check (status in ('open','settled','cancelled')),
+        constraint tessera_booking_price_whole_sparks check (price_wei % ${WEI_PER_SPARK_SQL} = 0),
+        constraint tessera_booking_price_not_negative check (price_wei >= 0),
+        -- A slot on the hour. A calendar whose slots are arbitrary instants cannot be shown as a
+        -- calendar, and two "same" slots a millisecond apart would both be open.
+        constraint bookings_slot_is_on_the_hour check (date_trunc('hour', slot) = slot),
+        -- An open booking holds money or it is not holding a slot: §6.4's bookable calendar is a
+        -- promise the venue owner can rely on, and a free hold is a denial-of-service on it.
+        constraint bookings_open_holds_money check (status <> 'open' or reservation_id is not null)
+      );
+
+      -- §11.6: "create unique index tessera_one_open_booking on bookings (parcel_id, slot) where
+      -- status = 'open'". Partial, so a cancelled booking does not block the slot forever.
+      create unique index if not exists tessera_one_open_booking
+        on bookings (parcel_id, slot) where status = 'open';
+
+      create or replace function tessera_assert_booking_is_a_venue() returns trigger
+        language plpgsql
+      as $$
+      declare
+        p record;
+      begin
+        select id, is_venue, status into p from parcels where id = new.parcel_id;
+        if p is null then
+          raise exception 'no parcel %', new.parcel_id using errcode = 'foreign_key_violation';
+        end if;
+        if not p.is_venue then
+          raise exception
+            'parcel % is not a Venue — only a Venue has a bookable calendar (23-tessera.md §6.4)', p.id
+            using errcode = 'check_violation';
+        end if;
+        if p.status <> 'held' then
+          raise exception 'parcel % is % — a released parcel has no calendar', p.id, p.status
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists bookings_need_a_venue on bookings;
+      create trigger bookings_need_a_venue
+        before insert on bookings
+        for each row execute function tessera_assert_booking_is_a_venue();
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- ENGAGEMENT GRANTS. §8.3 and §8.6.
+      --
+      -- EVERY GRANT NAMES ITS LEDGER ENTRY AND CANNOT BE WRITTEN BEFORE IT —
+      -- \`ledger_entry_id\` is NOT NULL, the rule 21 §7.4 states and market/src/engagement.ts
+      -- already follows. So the order is always: post to the ledger on a key derived from the
+      -- grant, then record. A crash between them leaves an entry with no row — the safe
+      -- direction, visible in the ledger, adopted by the retry — never a recorded payment that
+      -- never happened.
+      --
+      -- The debit side is always \`engagement:tessera\`, spelled by \`engagementAccount\` in
+      -- @cloudsforge/contracts-money rather than here, and it is an EQUITY account, which is what
+      -- makes the ledger refuse a grant the world cannot afford: \`ledger_assert_no_overdraft\`
+      -- exempts \`clearing\` and \`suspense\`, not \`equity\` (ledger/src/migrations.ts:441, :479).
+      -- §8.3: "not a promise that reserves exist, but a constraint that makes spending
+      -- non-existent reserves unrepresentable."
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists engagement_grants (
+        id              uuid          primary key default gen_random_uuid(),
+        kind            text          not null,
+        beneficiary     text          not null references accounts (subject) on delete restrict,
+        amount_wei      numeric(78,0) not null,
+        ledger_entry_id text          not null,
+        idempotency_key text          not null unique,
+        created_at      timestamptz   not null default now(),
+        constraint engagement_grants_kind_known check (kind in ('firing_allowance','commission','listing_fee_subsidy','first_listing_bounty')),
+        constraint engagement_grants_amount_positive check (amount_wei > 0),
+        constraint tessera_grant_whole_sparks check (amount_wei % ${WEI_PER_SPARK_SQL} = 0)
+      );
+    `,
+  },
+
+  {
+    version: 7,
+    name: 'discovery',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- FOOTFALL AND DWELL — THE WHOLE RANKING FUNCTION, AND THE ONLY TWO INPUTS IT WILL EVER
+      -- HAVE.
+      --
+      -- §6.5: "That is the whole ranking function, and the shortness is the point. Dwell is
+      -- included because footfall alone rewards a doorway that tricks people in; dwell punishes
+      -- it. There is no third signal, and specifically there is no paid one — ever."
+      --
+      -- Footfall is DISTINCT accounts per parcel per day, so the primary key is
+      -- (parcel_id, day, visitor_subject): a second visit by the same person on the same day
+      -- updates the row rather than inserting a second one, which makes "distinct accounts" a
+      -- property of the table rather than of a \`count(distinct …)\` somebody has to remember.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists visits (
+        parcel_id       uuid        not null references parcels (id) on delete cascade,
+        day             date        not null,
+        visitor_subject text        not null,
+        first_entered_at timestamptz not null default now(),
+        last_seen_at    timestamptz not null default now(),
+        dwell_seconds   integer     not null default 0,
+        primary key (parcel_id, day, visitor_subject),
+
+        -- ─────────────────────────────────────────────────────────────────────────────────────
+        -- NO SYNTHETIC FOOTFALL. §8.6, as a constraint rather than a promise.
+        --
+        -- "Tessera adds the world-specific version of the same rule: no synthetic footfall,
+        -- because footfall is the ranking signal (§6.5) and a platform that fakes footfall is a
+        -- platform rigging its own discovery."
+        --
+        -- micro-market made the money half of this unrepresentable —
+        -- \`escrows_never_platform_funded\`, \`bids_never_platform_funded\`,
+        -- \`offers_never_platform_funded\` (market/src/engagement.ts:11-15). This is the world
+        -- half: a visit by \`platform\`, \`platform:engagement-treasury\` or any
+        -- \`engagement:<service>\` subject cannot be written at all. There is no route that does
+        -- it, and after this there is no statement that could.
+        -- ─────────────────────────────────────────────────────────────────────────────────────
+        constraint tessera_footfall_is_never_synthetic check (visitor_subject like 'user:%'),
+        constraint visits_dwell_not_negative check (dwell_seconds >= 0)
+      );
+
+      create index if not exists visits_parcel_day_idx on visits (parcel_id, day);
+
+      -- A visit is activity, so it resets the fallow clock — the \`lastFootfallAt\` half of §4's
+      -- triple. In the database for the same reason the edit trigger is: so that every path that
+      -- records a visit resets it.
+      create or replace function tessera_touch_parcel_footfall() returns trigger
+        language plpgsql
+      as $$
+      begin
+        update parcels set last_footfall_at = greatest(coalesce(last_footfall_at, new.last_seen_at), new.last_seen_at)
+         where id = new.parcel_id and status = 'held';
+        return null;
+      end;
+      $$;
+
+      drop trigger if exists visits_touch_parcel on visits;
+      create trigger visits_touch_parcel
+        after insert or update on visits
+        for each row execute function tessera_touch_parcel_footfall();
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- PRESENCE — PUSH ON CHANGE, NEVER POLLED, AND NEVER ON A TIMER.
+      --
+      -- §4: "A move writes a row and raises a Postgres NOTIFY; the SSE handler forwards it. There
+      -- is no broadcast timer anywhere — which is both the rule and, here, the simpler design."
+      --
+      -- The NOTIFY is raised by a TRIGGER rather than by the handler, so a presence change made
+      -- by any path at all is broadcast. A handler-side notify is one code path away from a move
+      -- nobody sees.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists presence (
+        ward_id    uuid        not null references wards (id) on delete cascade,
+        subject    text        not null,
+        instance   integer     not null,
+        x          integer     not null,
+        y          integer     not null,
+        updated_at timestamptz not null default now(),
+        primary key (ward_id, subject),
+        constraint presence_instance_positive check (instance >= 1),
+        constraint presence_within_grid check (x between 0 and 255 and y between 0 and 255),
+        constraint presence_is_a_person check (subject like 'user:%')
+      );
+
+      create index if not exists presence_instance_idx on presence (ward_id, instance);
+
+      -- §6.1: "Ward instance capacity — 60 avatars." §4: "the 61st arrival opens instance 2".
+      -- A constraint trigger rather than a handler count, because two arrivals racing would both
+      -- read 60 and both write; the trigger runs inside each transaction and the loser raises.
+      create or replace function tessera_assert_instance_capacity() returns trigger
+        language plpgsql
+      as $$
+      declare
+        occupied integer;
+      begin
+        select count(*) into occupied
+          from presence where ward_id = new.ward_id and instance = new.instance;
+        if occupied > 60 then
+          raise exception
+            'ward % instance % holds % avatars — capacity is 60 and the next arrival opens a new instance (23-tessera.md §4)',
+            new.ward_id, new.instance, occupied
+            using errcode = 'check_violation';
+        end if;
+        return null;
+      end;
+      $$;
+
+      drop trigger if exists presence_within_instance_capacity on presence;
+      create constraint trigger presence_within_instance_capacity
+        after insert or update on presence
+        deferrable initially deferred
+        for each row execute function tessera_assert_instance_capacity();
+
+      create or replace function tessera_notify_presence() returns trigger
+        language plpgsql
+      as $$
+      declare
+        row_now record;
+      begin
+        row_now := coalesce(new, old);
+        perform pg_notify('tessera_presence', json_build_object(
+          'wardId', row_now.ward_id,
+          'subject', row_now.subject,
+          'instance', row_now.instance,
+          'x', case when tg_op = 'DELETE' then null else row_now.x end,
+          'y', case when tg_op = 'DELETE' then null else row_now.y end,
+          'op', lower(tg_op)
+        )::text);
+        return null;
+      end;
+      $$;
+
+      drop trigger if exists presence_push_on_change on presence;
+      create trigger presence_push_on_change
+        after insert or update or delete on presence
+        for each row execute function tessera_notify_presence();
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- BEACONS — free, and rate-limited to 3 per parcel per 7 days.
+      --
+      -- §6.5: "a limit that exists so that a Beacon means something, and which cannot be raised
+      -- by paying." There is no \`beacon_allowance\` column for a SKU to grant, and the trigger
+      -- reads no entitlement: the limit is the same integer for every account in the world.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists beacons (
+        id         uuid        primary key default gen_random_uuid(),
+        parcel_id  uuid        not null references parcels (id) on delete cascade,
+        lit_by     text        not null references accounts (subject) on delete restrict,
+        headline   text        not null,
+        lit_at     timestamptz not null default now(),
+        constraint beacons_headline_length check (length(headline) between 1 and 200)
+      );
+
+      create index if not exists beacons_parcel_idx on beacons (parcel_id, lit_at desc);
+
+      create or replace function tessera_assert_beacon_rate() returns trigger
+        language plpgsql
+      as $$
+      declare
+        recent integer;
+      begin
+        select count(*) into recent
+          from beacons
+         where parcel_id = new.parcel_id and lit_at > now() - interval '7 days';
+        if recent > 3 then
+          raise exception
+            'parcel % has lit % beacons in seven days — the limit is 3 and it cannot be raised by paying (23-tessera.md §6.5)',
+            new.parcel_id, recent
+            using errcode = 'check_violation';
+        end if;
+        return null;
+      end;
+      $$;
+
+      drop trigger if exists beacons_within_rate_limit on beacons;
+      create constraint trigger beacons_within_rate_limit
+        after insert on beacons
+        deferrable initially immediate
+        for each row execute function tessera_assert_beacon_rate();
+    `,
+  },
+
+  {
+    version: 8,
+    name: 'provisioning',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- THE TITLE CONTRACT'S IDEMPOTENCY. §11.8.
+      --
+      -- worlds sends \`entitlementId\` as BOTH the Idempotency-Key header and a body field
+      -- (worlds/src/titleclient.ts:149), and its conformance suite asks the same provision twice
+      -- and requires the same \`urn\` with \`replayed: true\` the second time
+      -- (worlds/src/conformance.ts:233-246). The primary key IS the idempotency: a replay
+      -- conflicts, and the stored \`urn\` is returned rather than a second Private Ward being
+      -- raised for one payment.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists provisions (
+        entitlement_id text        primary key,
+        subject        text        not null,
+        user_id        uuid        not null,
+        sku            text        not null,
+        scope          text,
+        urn            text        not null unique,
+        ward_id        uuid        references wards (id) on delete restrict,
+        metadata       jsonb       not null default '{}'::jsonb,
+        created_at     timestamptz not null default now(),
+        constraint provisions_urn_shape check (urn ~ '^urn:cloudsforge:tessera:')
+      );
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- ENTITLEMENTS this title honours, from micro-billing.
+      --
+      -- §7.3's table, minus everything §7.1 refuses. \`kind\` is a closed set and the set is the
+      -- refusal: there is no 'discovery', no 'vote_weight', no 'safety', no 'land' and no
+      -- 'fee_discount' value, so a billing webhook that tried to grant one has nowhere to write
+      -- it. §12's test 4 asserts each absence with force rather than trusting this comment.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists entitlements (
+        id             uuid        primary key default gen_random_uuid(),
+        subject        text        not null references accounts (subject) on delete restrict,
+        kind           text        not null,
+        sku            text        not null,
+        entitlement_id text        not null unique,
+        granted_at     timestamptz not null default now(),
+        revoked_at     timestamptz,
+        constraint entitlements_kind_known check (kind in (
+          'kiln_capacity','deed_slots','appearance','name_reservation','private_ward','venue_calendar'
+        ))
+      );
+
+      create index if not exists entitlements_subject_idx on entitlements (subject)
+        where revoked_at is null;
+    `,
+  },
 ]
 
 /**
@@ -594,7 +1245,17 @@ export const TABLES: readonly string[] = Object.freeze([
   'event_subscriptions',
   'outbox',
   'inbox',
+  'engagement_grants',
+  'bookings',
+  'listings',
+  'beacons',
+  'visits',
+  'presence',
+  'placements',
+  'objects',
   'contests',
+  'entitlements',
+  'provisions',
   'parcels',
   'accounts',
   'wards',
