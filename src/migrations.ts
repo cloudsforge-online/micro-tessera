@@ -1218,6 +1218,55 @@ export const MIGRATIONS: readonly Migration[] = [
         where revoked_at is null;
     `,
   },
+
+  {
+    version: 9,
+    name: 'envelope-is-the-contracts-envelope',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- \`actor\` AND \`correlation_id\` ARE NOT NULL, BECAUSE THE CONTRACT SAYS SO AND THE
+      -- TEMPLATE DOES NOT.
+      --
+      -- Migration 2 copied the template's outbox, which leaves both nullable and writes nulls for
+      -- any event that names no actor. That shape is not a lagging registry, it is MALFORMED, and
+      -- it was measured rather than reasoned about:
+      --
+      --   classifyEnvelope({ …, actor: null, correlationId: null })
+      --     -> { ok: false, reason: 'malformed',
+      --          defects: ['actor: missing',
+      --                    'correlationId: missing; a cross-service investigation stops here'] }
+      --
+      -- \`EventEnvelope\` (contracts/packages/events/src/index.ts:796) declares both as required
+      -- strings and \`correlationId\` carries a paragraph saying it is "never optional". Eighteen
+      -- repositories copied the nullable version.
+      --
+      -- A separate migration rather than an edit to migration 2, because a released migration is
+      -- immutable — @cloudsforge/db checksums the text and refuses a run where it changed, since
+      -- two databases would otherwise disagree about what "version 2" means. The fix for a wrong
+      -- migration is always a new migration.
+      --
+      -- Existing rows are backfilled to the same defaults the writer now uses, so the backfill and
+      -- the code cannot disagree: 'system' is the contract's Actor member for a change no person
+      -- asked for, and an event's own id is the least-wrong correlation for one that never had one.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      update outbox set actor = 'system' where actor is null;
+      update outbox set correlation_id = id::text where correlation_id is null;
+
+      alter table outbox alter column actor set not null;
+      alter table outbox alter column actor set default 'system';
+      alter table outbox alter column correlation_id set not null;
+
+      do $$ begin
+        alter table outbox add constraint outbox_actor_shape
+          check (actor = 'system' or actor ~ '^(user|service|operator):.+$');
+      exception when duplicate_object then null; end $$;
+
+      do $$ begin
+        alter table outbox add constraint outbox_correlation_is_not_empty
+          check (length(correlation_id) > 0);
+      exception when duplicate_object then null; end $$;
+    `,
+  },
 ]
 
 /**
