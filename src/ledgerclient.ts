@@ -29,12 +29,12 @@
 
 import { HttpClient } from '@cloudsforge/http'
 import {
-  CLEARING,
   accountKey,
   assertBalanced,
   engagementSubject,
   userSubject,
   type AccountPurpose,
+  type AccountSubject,
   type AccountType,
   type Actor,
   type LedgerAssetCode,
@@ -42,12 +42,21 @@ import {
   type TokenAssetCode,
 } from '@cloudsforge/contracts-money'
 import { ASSET } from './sparks.ts'
-import { ENGAGEMENT_ACCOUNT, GRANT_ENTRY_KIND, AVAILABLE, PAYOUT_DUE } from './economy.ts'
+import { GRANT_ENTRY_KIND, AVAILABLE, PAYOUT_DUE } from './economy.ts'
 import { SERVICE } from './env.ts'
 
-/** The wire form of an account. Four fields, all of which the ledger keys or checks on. */
+/**
+ * The wire form of an account. Four fields, all of which the ledger keys or checks on.
+ *
+ * `subject` is the CONTRACT's `AccountSubject` union rather than `string`, and that is what lets
+ * the account literals below be written as literals safely: `'clearing'` is checked against the
+ * union at compile time, so a typo is a build error rather than a second account. It also means
+ * every subject reaching the ledger came from `userSubject`/`engagementSubject` or is one of the
+ * contract's named singletons — there is no longer a path for an arbitrary string to become an
+ * account key.
+ */
 export interface AccountRef {
-  readonly subject: string
+  readonly subject: AccountSubject
   readonly assetCode: LedgerAssetCode
   readonly purpose: AccountPurpose
   readonly type: AccountType
@@ -243,24 +252,88 @@ function translate(err: unknown): Error {
 
 /* -------------------------------------------------------------------------- account shapes */
 
-/** A person's own money. Always a `liability`: the platform owes it to them. */
-export function holder(subject: string, purpose: AccountPurpose): AccountRef {
-  const canonical = subject.startsWith('user:')
-    ? userSubject(subject.slice('user:'.length))
-    : subject
-  return { subject: canonical, assetCode: ASSET, purpose, type: 'liability' }
+/**
+ * The user id inside a `user:` subject, or a refusal.
+ *
+ * **Every subject this service can hold is a user subject, and the DATABASE is what says so**:
+ * `accounts.subject` carries `constraint accounts_subject_is_a_user check (subject like 'user:%')`
+ * (`migrations.ts:203`), and every subject-bearing column — `author_subject`, `owner_subject`,
+ * `beneficiary`, `seller_subject`, `booked_by` — is a foreign key into it. So a subject that is
+ * not a user's cannot have reached this file from any table Tessera owns.
+ *
+ * This used to be a ternary that PASSED THROUGH anything without the prefix, which meant
+ * `holder('alice', …)` quietly produced an account keyed on the subject `alice` — not a user
+ * account, not any kind the contract names, and unreconcilable with every other service's. The
+ * refusal is the honest form of what the constraint already guarantees, and it also lets the
+ * subject be spelled through `userSubject`, which is the contract's own way of saying "user".
+ */
+function userIdOf(subject: string): string {
+  if (!subject.startsWith('user:')) {
+    throw new LedgerError(
+      'invalid_subject',
+      `${subject} is not a user subject — Tessera's accounts table admits none other ` +
+        '(migrations.ts:203, accounts_subject_is_a_user)',
+      500,
+    )
+  }
+  return subject.slice('user:'.length)
 }
 
-/** The engagement reserve, spelled by the contract. `equity`, which is the whole point. */
+/**
+ * The two purposes Tessera ever posts a person's money to.
+ *
+ * **Not `AccountPurpose`, and the narrowing is a guard rather than tidiness.** `economy.test.ts`
+ * asserts over the whole repository that Tessera never debits `payout_due` — releasing a
+ * creator's proceeds is micro-market's job and a second service doing it pays twice. That test
+ * scans source for the spelling; this type makes the spelling not compile. `PAYOUT_DUE` stays
+ * imported for READING a balance, which is not moving one.
+ */
+export type HolderPurpose = 'available' | 'reserved'
+
+/**
+ * A person's own money. Always a `liability`: the platform owes it to them.
+ *
+ * **The two branches are one account shape written twice on purpose.** `micro-conformance`'s
+ * `ledger-accounts` sweep reconciles the type every service claims per account key by reading
+ * object literals out of source, and it can only compare a key it can read: a `purpose` held in a
+ * variable is a wildcard that takes part in no comparison at all. Written out, both of Tessera's
+ * user accounts are checked against every other service's `user`/`available` and `user`/`reserved`
+ * claims — which is the check that would have caught the `platform`/`fees` defect that worlds,
+ * emberkin and settlement each shipped independently. Collapsing these back into one literal with
+ * `purpose` as a variable would be tidier and would switch that comparison off.
+ */
+export function holder(subject: string, purpose: HolderPurpose): AccountRef {
+  const canonical = userSubject(userIdOf(subject))
+  return purpose === 'reserved'
+    ? { subject: canonical, assetCode: ASSET, purpose: 'reserved', type: 'liability' }
+    : { subject: canonical, assetCode: ASSET, purpose: 'available', type: 'liability' }
+}
+
+/**
+ * The subject the reserve lives under, for a test or an operator to look up.
+ *
+ * Declared BEFORE `ENGAGEMENT_REF`, which reads it at module-evaluation time. The other order is
+ * a temporal-dead-zone `ReferenceError` on import, not a lint nit.
+ */
+export const ENGAGEMENT_SUBJECT = engagementSubject(SERVICE)
+
+/**
+ * The engagement reserve. `equity`, which is the whole point.
+ *
+ * **Spelled so that a static reader can see it, and pinned to the contract by a test.** This was
+ * three property reads off `ENGAGEMENT_ACCOUNT`, which is `engagementAccount(SERVICE, ASSET)` and
+ * therefore already constant — but `micro-conformance`'s sweep resolves a subject through the
+ * contract's factory or a local `const`, not through a property access on an imported one, so the
+ * estate's single most-cited account read as unresolvable. Nothing about the account changed; only
+ * the spelling did. `economy.test.ts` asserts field-for-field that this still equals
+ * `ENGAGEMENT_ACCOUNT`, so the contract remains the authority and the literal cannot drift.
+ */
 export const ENGAGEMENT_REF: AccountRef = {
-  subject: ENGAGEMENT_ACCOUNT.subject,
-  assetCode: ENGAGEMENT_ACCOUNT.assetCode,
-  purpose: ENGAGEMENT_ACCOUNT.purpose,
+  subject: ENGAGEMENT_SUBJECT,
+  assetCode: ASSET,
+  purpose: 'treasury',
   type: 'equity',
 }
-
-/** The subject the reserve lives under, for a test or an operator to look up. */
-export const ENGAGEMENT_SUBJECT = engagementSubject(SERVICE)
 
 /**
  * The two postings of an engagement grant.
@@ -438,17 +511,19 @@ export async function walletOf(ledger: LedgerClient, subject: string): Promise<W
  * engagement account cannot be reused here: an issuance account MUST go negative, because the
  * negative is the count of that object in circulation.
  *
- * `clearing` is a SINGLETON subject spelled by the contract (`CLEARING`,
+ * `clearing` is a SINGLETON subject named by the contract (`AccountSubject`,
  * `contracts/packages/money/src/index.ts`), not a new one invented here. The account key is
  * `(subject, assetCode, purpose)` and the asset code is unique per object, so `clearing /
- * TOKEN:cf:tessera:object:<hex> / treasury` is a distinct account per object that sits at exactly
+ * TOKEN:cf:tessera:object:<hex> / suspense` is a distinct account per object that sits at exactly
  * `-1` once the object is issued. An operator reading `-1` is reading "one of this object exists".
  *
  * **No service in the estate had written a `TOKEN:` balance before this one**, which was verified
- * rather than assumed, and is why every field is cited: there is no prior spelling to match, so
- * this is the one that the next service will have to match. `ledger/src/accounts.ts` throws on a
- * `type` mismatch against an existing account and whichever service posts second has EVERY entry
- * refused.
+ * rather than assumed, and is why every field is cited: there is no prior spelling of the ASSET to
+ * match, so this is the one that the next service will have to match. The `(subject, purpose,
+ * type)` triple, by contrast, is NOT novel and must not be — `trade/src/ledgerclient.ts:203-204`
+ * writes `clearing`/`suspense`/`clearing` already, and this matches it deliberately.
+ * `ledger/src/accounts.ts` throws on a `type` mismatch against an existing account and whichever
+ * service posts second has EVERY entry refused.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
@@ -457,15 +532,36 @@ export const ONE_OBJECT = 1n
 
 /** The creator's holding of their own object. `liability`: the platform owes it to them. */
 export function objectHolder(subject: string, assetCode: TokenAssetCode): AccountRef {
-  const canonical = subject.startsWith('user:')
-    ? userSubject(subject.slice('user:'.length))
-    : subject
-  return { subject: canonical, assetCode, purpose: AVAILABLE, type: 'liability' }
+  const canonical = userSubject(userIdOf(subject))
+  // `'available'` as a literal, not `AVAILABLE`. It is the same value — economy.ts declares
+  // `AVAILABLE = 'available' as const` — but micro-conformance reads purposes as literals only,
+  // so the constant made this account's key unreadable to the one check that compares it against
+  // the rest of the estate. Same account, spelled where a reader can see it.
+  return { subject: canonical, assetCode, purpose: 'available', type: 'liability' }
 }
 
-/** The issuance counterparty. `clearing`, which is the only type permitted to go negative. */
+/**
+ * The issuance counterparty. `clearing`, which is the only type permitted to go negative.
+ *
+ * **The purpose is `suspense`, and it was `treasury` until micro-conformance's chart said
+ * otherwise.** `treasury` is `equity` for the platform and the engagement programme, `asset` for
+ * custody and `liability` for a community — it is never `clearing`, in any service in the estate.
+ * `clearing`/`suspense` is: `contracts` calls it "value in transit, owed onwards", and
+ * `trade/src/ledgerclient.ts:203-204` already posts exactly this shape, so this now MATCHES a
+ * spelling that exists rather than inventing a third.
+ *
+ * The safety property is unchanged and is now doubly held: `ledger_assert_no_overdraft` returns
+ * early for `acct.type = 'clearing'` AND for `acct.purpose = 'suspense'`
+ * (`ledger/src/migrations.ts:464`, `:467`), and the negative balance here is the count of the
+ * object in circulation.
+ */
 export function objectIssuer(assetCode: TokenAssetCode): AccountRef {
-  return { subject: CLEARING, assetCode, purpose: 'treasury', type: 'clearing' }
+  // The literal, not the contract's `CLEARING` constant, for the reason given on `objectHolder`
+  // — and it is the estate's prevailing spelling (billing, foresight, market, mint, settlement,
+  // trade and wallet all write the singleton out). `AccountRef.subject` is the contract's
+  // `AccountSubject` union, so the compiler checks this against the contract; `marketseam.test.ts`
+  // additionally pins it to `CLEARING` itself.
+  return { subject: 'clearing', assetCode, purpose: 'suspense', type: 'clearing' }
 }
 
 /**

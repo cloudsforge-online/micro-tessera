@@ -125,6 +125,38 @@ Phase 2 and beyond, stated so nobody looks for it:
   exist and are tested; the Solidity contract, its deployment through `mint`, and the job that
   calls it do not. §9.3 gates v2 on two named changes in other repositories — a `user` signing
   purpose in `custody` and a log-query surface in `indexer` — and neither has landed.
+* **The venue booking route.** `bookVenue` (`src/economy.ts`) and `tessera.venue.booked` exist and
+  are tested against a real database; **nothing in the running service calls them, and this is
+  unfixed work rather than a decision.** It is deliberately NOT the `recordAnchor` case above:
+  that one waits on a Solidity contract nobody has written, whereas every dependency of this one
+  already exists — `micro-ledger` serves `POST /reservations` and `POST /reservations/:id/release`
+  (`ledger/src/server.ts:448`, `:487`), and `micro-notify` has a finished, unblocked rule for the
+  topic (`notify/src/catalogue.ts:1266`, template `templates.ts:467`, tests
+  `catalogue.test.ts:969`) resolving the recipient through the `ownerSubject` this emitter puts on
+  the payload. Nor is it the `transferParcel` case: no other service in the estate books a venue,
+  so there is no duplicate implementation to consolidate into.
+
+  What is missing is the rest of the feature, not a line of wiring:
+
+  * **A rate.** `parcels.is_venue` is a boolean and there is no rate column anywhere;
+    `BookInput.priceWei` is an unsourced input, and `price_wei >= 0` admits a zero-price booking.
+    Who sets the price of a slot is undecided, and a route cannot be written before it is.
+  * **The other two thirds of the lifecycle.** `bookings.status` is
+    `open | settled | cancelled` and only the `open` insert exists. A booking that can be opened
+    but never settled or cancelled strands a player's EMBER in `reserved` permanently — the
+    release half (`POST /reservations/:id/release`) is the part that makes the hold safe, and it
+    is the part with no code.
+  * **A `ledger:reserve` grant.** Tessera holds `ledger:post` only, and
+    `deploy/compose/estate/grant-gaps.json` derives that from the call sites that exist — "it
+    reaches no other ledger route". `POST /reservations` is gated on `RESERVE_SCOPE`
+    (`ledger/src/server.ts:80`). That block is real but **not external**: it is computed from this
+    repository's own source, so it opens by itself the day the call site is written.
+
+  The emitter is the first slice of that feature and it waits for the rest. The half that WOULD
+  have been a defect — an emitter whose payload no consumer had ever checked — is closed:
+  `economy.test.ts` exercises it against a real database and asserts the outbox row, and
+  `contracts.test.ts` pins `keyedBy` to `parcel_id`.
+
 * **Ward governance minting a `micro-community` community.** `wards.community_id` exists and
   `community.proposal.executed` is consumed and applied; nothing creates the community yet.
 * **Market and billing HTTP calls.** `draftListing` writes the Tessera half with its terms

@@ -57,6 +57,7 @@ import {
   createCommunityClient,
   wardCommunitySlug,
 } from './communityclient.ts'
+import { CLEARING } from '@cloudsforge/contracts-money'
 import { issuePostings, balanceCheck, ONE_OBJECT } from './ledgerclient.ts'
 import { bindWardCommunity, WorldError } from './world.ts'
 import { fromSparks } from './sparks.ts'
@@ -509,6 +510,17 @@ test('an object is issued liability-to-its-author against a clearing counterpart
   assert.equal(debit?.direction, 'debit')
   assert.equal(debit?.account.subject, 'clearing')
   assert.equal(debit?.account.type, 'clearing')
+  // Pinned to the CONTRACT's singleton, because `objectIssuer` writes the literal rather than
+  // importing `CLEARING` — micro-conformance's sweep cannot follow an imported constant into an
+  // account literal, and an account it cannot read is one it cannot reconcile against the estate.
+  // This assertion is what makes the literal safe: the contract is still the authority.
+  assert.equal(debit?.account.subject, CLEARING)
+  // `suspense`, NOT `treasury`. `treasury` is equity/asset/liability everywhere in this estate and
+  // never `clearing`; micro-conformance's chart rejected the old spelling as implausible. This
+  // matches `trade/src/ledgerclient.ts:203-204`, which posts clearing/suspense/clearing already.
+  // `ledger_assert_no_overdraft` exempts both `type = 'clearing'` and `purpose = 'suspense'`
+  // (ledger/src/migrations.ts:464, :467), so the negative this account must reach is still legal.
+  assert.equal(debit?.account.purpose, 'suspense')
   assert.equal(credit?.direction, 'credit')
   assert.equal(credit?.account.subject, ALICE_SUBJECT)
   assert.equal(credit?.account.type, 'liability')

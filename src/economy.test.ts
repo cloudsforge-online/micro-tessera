@@ -38,7 +38,15 @@ import {
   draftListing,
   platformTerms,
 } from './economy.ts'
-import { ENGAGEMENT_REF, grantPostings, reservePostings, balanceCheck } from './ledgerclient.ts'
+import {
+  ENGAGEMENT_REF,
+  ENGAGEMENT_SUBJECT,
+  grantPostings,
+  holder,
+  objectHolder,
+  reservePostings,
+  balanceCheck,
+} from './ledgerclient.ts'
 import { entitlementKindFor } from './inbound.ts'
 import { fromSparks } from './sparks.ts'
 import { WorldError } from './world.ts'
@@ -259,6 +267,40 @@ test('the engagement account is engagement:tessera / EMBER / treasury, typed equ
   assert.equal(ENGAGEMENT_ACCOUNT.purpose, 'treasury')
   assert.equal(ENGAGEMENT_REF.type, 'equity')
   assert.equal(GRANT_ENTRY_KIND, 'treasury_spend')
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // AND `ENGAGEMENT_REF` IS STILL FIELD-FOR-FIELD THE CONTRACT'S ACCOUNT.
+  //
+  // It used to be three property reads off `ENGAGEMENT_ACCOUNT`, which made drift impossible by
+  // construction and made the account unreadable to micro-conformance's `ledger-accounts` sweep —
+  // the check that reconciles the type every service claims per key, and the only thing in the
+  // estate that would catch a second service typing `engagement:tessera` differently. It is now
+  // written out so the sweep can compare it. THIS is what replaces the derivation: if anyone
+  // changes the contract's `engagementAccount`, or retypes this literal, these four fail.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  assert.equal(ENGAGEMENT_REF.subject, ENGAGEMENT_ACCOUNT.subject)
+  assert.equal(ENGAGEMENT_REF.assetCode, ENGAGEMENT_ACCOUNT.assetCode)
+  assert.equal(ENGAGEMENT_REF.purpose, ENGAGEMENT_ACCOUNT.purpose)
+  assert.equal(ENGAGEMENT_SUBJECT, ENGAGEMENT_ACCOUNT.subject)
+})
+
+/**
+ * The refusal that replaced a silent pass-through.
+ *
+ * `holder` used to canonicalise a `user:` subject and return anything else UNCHANGED, so
+ * `holder('alice', …)` produced an account keyed on the subject `alice` — not a user account, not
+ * any kind `AccountSubject` names, and reconcilable with nothing. Tessera's `accounts` table
+ * admits no such subject (`accounts_subject_is_a_user`, migrations.ts:203) and every subject
+ * column is a foreign key into it, so this path was already unreachable from the database; the
+ * throw is that guarantee said out loud rather than assumed.
+ */
+test('an account subject that is not a user is refused, not passed through', () => {
+  assert.throws(() => holder('alice', 'available'), /not a user subject/)
+  assert.throws(() => holder('platform', 'available'), /not a user subject/)
+  assert.throws(() => objectHolder('community:x', 'TOKEN:cf:tessera:object:ff'), /not a user subject/)
+  // The legitimate one still works, and still comes out spelled by the contract.
+  assert.equal(holder(ALICE_SUBJECT, 'available').subject, ALICE_SUBJECT)
+  assert.equal(holder(ALICE_SUBJECT, 'reserved').purpose, 'reserved')
 })
 
 test('a grant debits the engagement account and balances, and the postings are the wire shape', () => {
