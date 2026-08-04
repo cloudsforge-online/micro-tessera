@@ -438,10 +438,39 @@ function buildRoutes(): Route[] {
     //    signup. That is the test for whether removing a gate weakens authentication, and this one
     //    fails it: no principal could see anything here that anonymous cannot.
     //
-    // **What stays gated, deliberately, and why the line is drawn here.** `…/:id/presence` returns
-    // a subject with live `x, y` — where a named person is standing, right now. `…/:id/parcels`
-    // returns `ownerSubject` per parcel. Those name people; a ward does not. The Mosaic is the map,
-    // not the register and not the room.
+    // **`…/:id/parcels` goes with them, and that was decided AFTER the first fix, not with it.**
+    // Opening `/v1/wards` alone moved `beacon smoke` from a 401 on the ward list to a 401 on the
+    // ward's parcels, one request later — the first had been masking the second. The temptation is
+    // then to keep opening routes until a check goes green, which is how a gate gets removed for a
+    // reason that is not a reason. So it was decided the same way as the first, from the design:
+    //
+    //   * §5's loop is "arrive at the Commons … place it; open your gate — a parcel with an open
+    //     gate is a place people can enter … someone walks in". The person walking in has, by §5's
+    //     own first line, no account. A world you must register to see the buildings of has an
+    //     account wall two steps into its loop instead of one.
+    //   * `tessera-web` had already written the conclusion down, in the client that renders this
+    //     list: *"A shut gate is still openable as a screen — the parcel EXISTS and **the world is
+    //     public**. … a world with invisible buildings is a world that feels empty when it is not"*
+    //     (`tessera-web/src/pages/world.tsx:128`). Its empty state is "Nothing has been claimed in
+    //     this ward yet — **All of it is free.**"
+    //   * And it BOUNDS the change rather than starting a slide: the arrivals screen makes exactly
+    //     two calls, `listWards` and `listWardParcels`. It does not ask for presence. The next route
+    //     out is not needed by any anonymous screen, so this is the end of the opening, not a step
+    //     in one.
+    //
+    // **`ownerSubject` is exposed by this, knowingly.** It is the one field here that refers to a
+    // person, and the decision is recorded rather than glossed: it is an opaque uuid with no
+    // resolver an anonymous caller can reach; this estate publishes ownership by design already
+    // (on chain, and §9.2's Author of record is *derived and public* precisely so it cannot be
+    // forged); the screen that renders this list does not display it; and a free, self-serve account
+    // could always read it, so the gate was a signup wall and not a boundary. If that trade is ever
+    // reconsidered, the answer is to drop the field from THIS route's projection — `GET
+    // /v1/parcels/:id` answers "who owns it" and stays gated — not to close the world again.
+    //
+    // **What stays gated, and why the line is drawn exactly here.** `…/:id/presence` returns a
+    // subject with live `x, y` — where a named person is standing, right now. That is not a fact
+    // about the world, it is a fact about a body in it, and it is the one thing on this page that
+    // could put somebody somewhere. The map and the buildings are public; the room is not.
     //
     // No `authenticate` call at all, matching `worlds`: the response does not vary by principal, so
     // reading a token would be decoration, and a visitor whose access token has merely expired must
@@ -461,8 +490,6 @@ function buildRoutes(): Route[] {
     }),
 
     define('GET', '/v1/wards/:id/parcels', async (ctx, deps) => {
-      const principal = await authenticate(ctx, deps)
-      if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
       if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
       return { status: 200, body: { parcels: await listParcelsIn(deps.sql, ward.id) } }

@@ -32,18 +32,20 @@ import type { Server } from 'node:http'
 import type postgres from 'postgres'
 import { Lifecycle } from '@cloudsforge/lifecycle'
 import {
+  ALICE_SUBJECT,
   asDb,
   enabled,
   migrateTestDb,
   openDb,
   quietLogger,
   resetTessera,
+  seedAccounts,
   seedWard,
   skip,
   testMetrics,
 } from './testsupport.ts'
 import { createServer } from './server.ts'
-import { listWards } from './world.ts'
+import { claimParcel, listWards } from './world.ts'
 
 let sql: postgres.Sql
 let server: Server
@@ -116,15 +118,27 @@ test('a single ward is public too, because a list you may see and an item you ma
   assert.equal((await anonymous('/v1/wards/00000000-0000-4000-8000-000000000000')).status, 404)
 })
 
-test('THE LINE: what names a person is still refused, on the same server, in the same breath', { skip }, async () => {
+test('the buildings are public too — a world with invisible buildings feels empty when it is not', { skip }, async () => {
+  const wardId = await seedWard(sql)
+  const answer = await anonymous(`/v1/wards/${wardId}/parcels`)
+  assert.equal(answer.status, 200, 'the arrivals screen still refuses a stranger')
+  assert.ok(Array.isArray(answer.body['parcels']))
+
+  // The whole anonymous path, and it is only two calls: `listWards` then `listWardParcels`
+  // (`tessera-web/src/pages/world.tsx:47` and `:86`). Asserted so that "opening this bounded the
+  // change rather than starting a slide" is a fact a later reader can check rather than a claim.
+  assert.equal((await anonymous('/v1/wards')).status, 200)
+})
+
+test('THE LINE: what places a person is still refused, on the same server, in the same breath', { skip }, async () => {
   const wardId = await seedWard(sql)
 
   // `presence` returns a subject with live `x, y` — where a named person is standing, right now.
-  // `parcels` returns `ownerSubject` per parcel. `discover`, `me/parcels`, the objects and the
-  // listings are the market and the register. A ward is the map; none of these is.
+  // That is not a fact about the world, it is a fact about a body in it. `discover`, `me/parcels`,
+  // the objects and the listings are the market and the register. The map and the buildings are
+  // public; none of these is.
   for (const path of [
     `/v1/wards/${wardId}/presence`,
-    `/v1/wards/${wardId}/parcels`,
     '/v1/parcels/fallow',
     '/v1/discover',
     '/v1/me/parcels',
@@ -135,7 +149,38 @@ test('THE LINE: what names a person is still refused, on the same server, in the
   }
 })
 
-test('THE COUNT: exactly three routes are unauthenticated, and adding a fourth is a red build', { skip }, async () => {
+test('THE EXPOSURE: `ownerSubject` reaches an anonymous caller, and that was a decision', { skip }, async () => {
+  // Recorded rather than glossed. Opening `…/:id/parcels` publishes an opaque uuid per parcel that
+  // refers to a person. `server.ts` gives the four reasons that was judged acceptable — no resolver
+  // an anonymous caller can reach, an estate that publishes ownership by design, a screen that does
+  // not display it, and a gate that was a signup wall rather than a boundary — and names the remedy
+  // if the trade is ever reconsidered: drop the field from THIS projection, do not close the world.
+  //
+  // This case exists so that reconsidering it starts from a red test rather than from a discovery.
+  const wardId = await seedWard(sql)
+  await seedAccounts(sql, ALICE_SUBJECT)
+  await claimParcel(asDb(sql), {
+    wardId,
+    ownerSubject: ALICE_SUBJECT,
+    tier: 'homestead',
+    originX: 0,
+    originY: 0,
+    correlationId: 'publicreads-test',
+  })
+
+  const parcels = (await anonymous(`/v1/wards/${wardId}/parcels`)).body['parcels'] as Record<
+    string,
+    unknown
+  >[]
+  assert.equal(parcels.length, 1)
+  assert.equal(
+    parcels[0]?.['ownerSubject'],
+    ALICE_SUBJECT,
+    'ownerSubject stopped reaching anonymous callers — if that was deliberate, delete this test and say why in server.ts',
+  )
+})
+
+test('THE COUNT: exactly four routes are unauthenticated, and adding a fifth is a red build', { skip }, async () => {
   // The guard against widening one route at a time. `server.ts`'s route table is the subject, read
   // as source: a route with no `authenticate` call in its body is a route a stranger can reach, and
   // this is the complete list of the ones that may be.
@@ -170,6 +215,7 @@ test('THE COUNT: exactly three routes are unauthenticated, and adding a fourth i
       "GET TITLE_DESCRIPTOR_PATH",
       "GET '/v1/wards'",
       "GET '/v1/wards/:id'",
+      "GET '/v1/wards/:id/parcels'",
     ].sort(),
     'the set of unauthenticated routes changed — read server.ts on the Mosaic before widening it',
   )
