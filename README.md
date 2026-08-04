@@ -18,7 +18,8 @@ Binds **4022**. Schema version **10**.
 | `GET /livez` `GET /readyz` `GET /metrics` | none — rule 4 |
 | `GET /v1/title` | none. A descriptor is a capability statement, and worlds reads it before it holds any credential |
 | `POST /v1/provision` | `tessera:provision`, service token only. A user token is refused before the scope is even checked |
-| `GET /v1/wards` `…/:id` `…/:id/parcels` `…/:id/presence` | `tessera:read` for a service; any user otherwise |
+| `GET /v1/wards` `GET /v1/wards/:id` | **none — the Mosaic is public.** §5's loop opens with "arrive at the Commons … no account wall", and `worlds` already serves its registry unauthenticated because "a launcher listing games cannot require a token". A ward row is geography and occupancy; it names nobody. These authenticated until now, so a stranger following a link got a 401 and the page showed an error state — the last failing check in `beacon smoke`. `publicreads.test.ts` pins how far this goes and no further |
+| `…/:id/parcels` `…/:id/presence` | `tessera:read` for a service; any user otherwise. **Still gated deliberately**: presence is where a named person is standing right now, and a parcel carries its `ownerSubject`. The map is public; the register and the room are not |
 | `GET /v1/parcels/:id` `GET /v1/parcels/fallow` | `tessera:read` |
 | `GET /v1/discover` `GET /v1/terms` | `tessera:read` |
 | `GET /v1/objects` `…/:id` `GET /v1/listings` `…/:id` | `tessera:read` |

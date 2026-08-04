@@ -410,15 +410,51 @@ function buildRoutes(): Route[] {
 
     /* -------------------------------------------------------------------- the world, read */
 
-    define('GET', '/v1/wards', async (ctx, deps) => {
-      const principal = await authenticate(ctx, deps)
-      if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
-      return { status: 200, body: { wards: await listWards(deps.sql) } }
-    }),
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // **THE MOSAIC IS PUBLIC. A STRANGER MUST BE ABLE TO SEE THE MAP.**
+    //
+    // These two routes authenticated every read until now, and a signed-out visitor arriving at
+    // Tessera's front door got a 401 — the last failing check in `beacon smoke`. It is fixed here
+    // rather than allowed for, because the 401 was wrong, and three separate things say so.
+    //
+    // **1. The design forbids exactly this.** 23-tessera.md §5 opens the loop with
+    //
+    //        arrive at the Commons    a browser tab; no download, no plugin, NO ACCOUNT WALL
+    //
+    //    and §4 builds the whole economy on it: land is free and abundant, the platform never sells
+    //    it, supply is elastic and only LOCATION is scarce. A world whose map you must register to
+    //    look at has an account wall on the first arrow of its own loop.
+    //
+    // **2. The estate has already settled this, in these words.** `worlds/src/server.ts:507` serves
+    //    the title registry unauthenticated under the note "a launcher listing games cannot require
+    //    a token to do it". The Mosaic is that same object one level down: the list of places a
+    //    launcher, a search engine or a stranger following a link needs in order to decide to come.
+    //
+    // **3. It was never a security boundary, only a registration wall.** The projection is
+    //    `id, slug, name, archetype, ordinal, claimable_tiles, claimed_tiles, community_id,
+    //    instances, opened_at` (`world.ts:230`) — geography and occupancy, not one user-scoped or
+    //    money field. And ANY account could already read it, while an account is free and
+    //    self-serve. So the 401 excluded nobody it meant to; it only made a public map cost a
+    //    signup. That is the test for whether removing a gate weakens authentication, and this one
+    //    fails it: no principal could see anything here that anonymous cannot.
+    //
+    // **What stays gated, deliberately, and why the line is drawn here.** `…/:id/presence` returns
+    // a subject with live `x, y` — where a named person is standing, right now. `…/:id/parcels`
+    // returns `ownerSubject` per parcel. Those name people; a ward does not. The Mosaic is the map,
+    // not the register and not the room.
+    //
+    // No `authenticate` call at all, matching `worlds`: the response does not vary by principal, so
+    // reading a token would be decoration, and a visitor whose access token has merely expired must
+    // still see the world rather than an error. `tessera-web`'s `SignedOut` branch on this page
+    // (`tessera-web/src/pages/world.tsx:54`) becomes unreachable — it was a workaround for this
+    // defect, written by somebody who had already worked out that the page is public.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    define('GET', '/v1/wards', async (_ctx, deps) => ({
+      status: 200,
+      body: { wards: await listWards(deps.sql) },
+    })),
 
     define('GET', '/v1/wards/:id', async (ctx, deps) => {
-      const principal = await authenticate(ctx, deps)
-      if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
       if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
       return { status: 200, body: { ward } }
