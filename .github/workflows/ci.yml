@@ -63,11 +63,18 @@ jobs:
       # migrates it with the image's own migrator, and reads /livez — which is why the smoke-env
       # below has to be real.
       #
-      # Exactly what src/env.ts:204-211 demands and nothing else. TESSERA_DATABASE_URL is supplied
-      # by the job. The two signing secrets only have to clear 24 characters and miss the
-      # PLACEHOLDERS set at env.ts:70-80 — a known placeholder is refused at boot, deliberately, so
-      # `CHANGE_ME` from .env.example would fail this job rather than pass it. The identity URLs are
-      # never dialled, because /livez verifies no token. Never a real credential.
+      # Exactly what `loadEnv` demands and nothing else. TESSERA_DATABASE_URL is supplied by the
+      # job. The identity URLs are never dialled, because /livez verifies no token, and they are
+      # CI-only NON-secrets. Never a real credential.
+      #
+      # THE TWO SIGNING VARIABLES ARE NOT IN THAT CATEGORY ANY MORE, and the value they used to
+      # carry is why. `ci-only-not-a-real-secret-…` cleared the old guard for the same reason the
+      # estate's `estate-only-outbox-secret-…` did — a deny-list of exact strings plus a
+      # 24-character floor, and neither string was on any list (micro-org #142). The boot guard now
+      # checks the SHAPE and has no CI exemption, so `@generate` asks service-ci.yml for a fresh
+      # `openssl rand -base64 48` per line per run: CI holds a real secret rather than a string
+      # claiming to be one. The two lines each get their OWN value, which is what proves they are
+      # separate variables rather than one read twice.
       #
       # The optional upstreams — STUDIO_URL, LEDGER_URL, MARKET_URL and TESSERA_SERVICE_CREDENTIAL —
       # are deliberately absent: `.env.example` states that ABSENT IS A SUPPORTED MODE, the Kiln
@@ -76,8 +83,8 @@ jobs:
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4100/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4100
-        OUTBOX_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000
-        INBOUND_SIGNING_SECRET=ci-only-not-a-real-inbound-secret-0000
+        OUTBOX_SIGNING_SECRET=@generate
+        INBOUND_SIGNING_SECRET=@generate
     secrets:
       # @cloudsforge/* resolves through link:../runtime and link:../contracts rather than a
       # registry, so the workflow checks out micro-runtime and micro-contracts as siblings. Both are

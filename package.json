@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/tessera",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Tessera: a persistent isometric world. Wards, parcels claimed free and reclaimed by a fallow clock, objects fired from a prompt, and EMBER earned rather than only spent.",
   "license": "MIT",
@@ -34,6 +34,7 @@
     "@cloudsforge/http": "link:../runtime/packages/http",
     "@cloudsforge/jobs": "link:../runtime/packages/jobs",
     "@cloudsforge/lifecycle": "link:../runtime/packages/lifecycle",
+    "@cloudsforge/secrets": "link:../runtime/packages/secrets",
     "@cloudsforge/telemetry": "link:../runtime/packages/telemetry",
     "postgres": "^3.4.5",
     "tsx": "^4.19.2"

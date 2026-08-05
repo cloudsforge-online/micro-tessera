@@ -17,6 +17,7 @@
  */
 
 import { hostname } from 'node:os'
+import { assertGeneratedSecret, assertGeneratedSecretList } from '@cloudsforge/secrets'
 
 /**
  * The service's own name, from `service.ts` and NOT re-exported from here.
@@ -100,30 +101,60 @@ function requiredSecret(source: Source, name: string, minLength = 24): string {
 }
 
 /**
+ * The estate's shared event-bus HMAC key, held to a SHAPE rather than to a deny-list.
+ *
+ * `requiredSecret` above cannot be the guard for this one. It refuses a fixed list of exact strings
+ * and anything under 24 characters, and the value that sat on 54 lines of a PUBLIC compose file —
+ * `estate-only-outbox-secret-00000000000000` — was on no list and was 40 characters, so it passed
+ * every service in the estate (micro-org #142). A check that could not fail read as the absence of
+ * a problem.
+ *
+ * `assertGeneratedSecret` asserts what a placeholder cannot have: the base64 or hex alphabet (no
+ * hyphens — every placeholder this estate wrote had one), 32 decoded BYTES rather than 24
+ * keystrokes, and a measured Shannon entropy floor. It has no NODE_ENV exemption and no escape
+ * hatch, so CI generates a real value per run rather than being let through.
+ *
+ * `required` rather than `requiredSecret`, deliberately: the weaker checks are a strict subset of
+ * the stronger ones, and running them first would answer a 40-character placeholder with "must be
+ * at least 24 characters" — a message that is true, useless, and points the operator at the wrong
+ * property.
+ *
+ * It throws `SecretError` rather than `EnvError`, and that is not an oversight: the class is
+ * distinct so a configuration failure can be told from every other kind, and `fatalConfig` below
+ * reads `err.message` off `unknown`, so the boot line is identical either way. Re-wrapping would
+ * buy nothing and would put this file's own text between the operator and the guard's.
+ */
+function requiredSigningSecret(source: Source, name: string): string {
+  const value = required(source, name)
+  assertGeneratedSecret(name, value)
+  return value
+}
+
+/**
  * A comma-separated list of secrets, newest first.
  *
  * A LIST, not a value, because rotation without an overlap window means every producer must change
  * secret in the same instant this service does, and that instant does not exist during a rolling
  * deploy. The receiver publishes the new key, accepts both for a window, then drops the old one.
  *
- * Every entry is held to exactly the bar a single secret was held to — a rotation is not an excuse
- * to smuggle a placeholder in beside a real key. The house pattern; `devplatform/src/env.ts:103`
- * is the reference implementation and `activity` and `notify` carry the same shape.
+ * **Every entry faces exactly the bar a single secret faces — `assertGeneratedSecretList` is
+ * `assertGeneratedSecret` per entry, and there is no weaker rule for the outgoing key.** In a
+ * rotation overlap window the outgoing key is the one an attacker already holds if it leaked, and
+ * "just for the drain" is exactly how a placeholder survives the rotation meant to remove it.
+ *
+ * The local placeholder and length loop that used to sit here is GONE rather than kept in front:
+ * it is a strict subset of the shape check, and running it first answers a 40-character placeholder
+ * with "must each be at least 24 characters" — true, useless, and about the wrong property. What is
+ * kept is what the shape check does not know about: the empty-list refusal, whose message names
+ * this service's own variable, and the duplicate refusal below.
  */
-function parseSecretList(raw: string, name: string, minLength = 24): readonly string[] {
+function parseSecretList(raw: string, name: string): readonly string[] {
   const entries = raw
     .split(',')
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0)
   if (entries.length === 0) throw new EnvError(`${name} is required — at least one secret`)
-  for (const entry of entries) {
-    if (PLACEHOLDERS.has(entry.toLowerCase())) {
-      throw new EnvError(`${name} contains a known placeholder — generate real secrets`)
-    }
-    if (entry.length < minLength) {
-      throw new EnvError(`${name} entries must each be at least ${minLength} characters`)
-    }
-  }
+  assertGeneratedSecretList(name, entries)
   if (new Set(entries).size !== entries.length) {
     // A duplicated secret makes the "which key verified this" answer ambiguous, and that answer is
     // what tells an operator whether a rotation has finished and the old key may be dropped.
@@ -132,8 +163,8 @@ function parseSecretList(raw: string, name: string, minLength = 24): readonly st
   return Object.freeze(entries)
 }
 
-function requiredSecretList(source: Source, name: string, minLength = 24): readonly string[] {
-  return parseSecretList(required(source, name), name, minLength)
+function requiredSecretList(source: Source, name: string): readonly string[] {
+  return parseSecretList(required(source, name), name)
 }
 
 function optional(source: Source, name: string, fallback: string): string {
@@ -270,7 +301,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     databasePoolMax: integer(source, 'TESSERA_DATABASE_POOL_MAX', 10, 1, 100),
     identityJwksUrl: required(source, 'IDENTITY_JWKS_URL'),
     identityIssuer: required(source, 'IDENTITY_ISSUER'),
-    outboxSigningSecret: requiredSecret(source, 'OUTBOX_SIGNING_SECRET'),
+    outboxSigningSecret: requiredSigningSecret(source, 'OUTBOX_SIGNING_SECRET'),
     inboundSigningSecrets: requiredSecretList(source, 'INBOUND_SIGNING_SECRET'),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
     studioUrl: optionalOrigin(source, 'STUDIO_URL'),
