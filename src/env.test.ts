@@ -14,6 +14,23 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { randomBytes } from 'node:crypto'
+import { SignJWT, generateKeyPair } from 'jose'
+
+/**
+ * A service credential, and THIS FIXTURE CONTAINS HYPHENS ON PURPOSE — that is the most important
+ * thing about it.
+ *
+ * A credential body is base64**url**, so `-` and `_` are in its alphabet. Measured on the running
+ * estates: the mainnet credential is alphanumeric and the testnet one CONTAINS A HYPHEN. So a
+ * "secrets have no hyphens" rule — which is correct for the two signing keys below, and which every
+ * placeholder this estate wrote would have failed — passes mainnet and kills testnet at boot. That
+ * is why `env.ts` guards a credential with `assertServiceCredential` and never `assertGeneratedSecret`.
+ *
+ * Keeping a hyphenated credential here means that mistake fails CI instead of failing one estate in
+ * production. Do not "tidy" the hyphens out of this value. It is fabricated — identity's shape and
+ * none of its entropy — and is never a value out of `deploy/compose/estate/tokens.env`.
+ */
+const CREDENTIAL = 'cfsc_Zq3W-Hn8Kd-Rb61Vy-Ls9Mx4Tf7Pg-Cj2Ue5Ao0Dw6Xr'
 
 /**
  * A valid environment, applied to the process BEFORE `./env.ts` is imported.
@@ -167,5 +184,104 @@ test('INBOUND_SIGNING_SECRET listing the same secret twice is refused', () => {
   assert.throws(
     () => loadEnv({ ...BASE, INBOUND_SIGNING_SECRET: `${NEXT_KEY},${NEXT_KEY}` }, 'host'),
     /twice/,
+  )
+})
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * micro-org #222. THE VARIABLE THAT HELD A TOKEN WHERE A CREDENTIAL BELONGS.
+ *
+ * `TESSERA_SERVICE_CREDENTIAL` was guarded by `requiredSecret` — a deny-list of nine exact strings
+ * plus a 24-character floor — and on the live estate it held a JWT that had been expired for
+ * TWENTY-SIX HOURS on a container reporting healthy. That guard passed it: a service token is well
+ * over 24 characters and is on no list. A check that could not fail read as the absence of a
+ * problem, which is micro-org #142's lesson arriving at a second variable.
+ *
+ * `assertServiceCredential` refuses a JWT BY NAME and first of all, before any length or entropy
+ * rule, precisely because the message an operator needs is "this is a token, and a token cannot
+ * renew itself" rather than "this is too short".
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A genuine RS256 service token, minted here rather than hand-shaped.
+ *
+ * A literal `ey…` string would prove the regex matches a string somebody typed. This proves the
+ * guard refuses **the thing that was actually in the variable**: identity's own token shape, its own
+ * claims, and the ten-minute expiry that is the whole of the defect.
+ */
+const { privateKey } = await generateKeyPair('RS256', { extractable: true })
+const EXPIRED_TOKEN = await new SignJWT({ typ: 'service', scopes: ['tessera:read'] })
+  .setProtectedHeader({ alg: 'RS256', kid: 'k1' })
+  .setIssuedAt()
+  .setIssuer('https://identity.test')
+  .setAudience('cloudsforge')
+  .setSubject('service:tessera')
+  // 600 seconds — identity/src/tokens.ts:33, and the reason this variable is a defect rather than
+  // a style preference.
+  .setExpirationTime('600s')
+  .sign(privateKey)
+
+test('a well-formed JWT in TESSERA_SERVICE_CREDENTIAL is refused BY NAME', () => {
+  assert.throws(
+    () => loadEnv({ ...BASE, TESSERA_SERVICE_CREDENTIAL: EXPIRED_TOKEN }, 'host'),
+    (err: unknown) => {
+      const message = (err as Error).message
+      assert.ok(!message.includes(EXPIRED_TOKEN), 'the refusal echoed the token')
+      assert.match(message, /TESSERA_SERVICE_CREDENTIAL/)
+      // Not "too short", not "a placeholder" — the message must say what it actually is, because
+      // the remedy is a different variable rather than a better value.
+      assert.match(message, /TOKEN, not a credential/)
+      assert.match(message, /ten-minute/)
+      return true
+    },
+    'the JWT that was live on the estate for 26 hours still boots this service',
+  )
+})
+
+test('the same JWT is refused in TESSERA_IDENTITY_CREDENTIAL, which is where it will be pasted', () => {
+  // The migration's likeliest mistake: an operator adding the new variable and filling it from the
+  // old one. Refused at the door rather than ten minutes into the deploy, and the `cfsc_` prefix is
+  // named so the message is also the instruction.
+  assert.throws(
+    () => loadEnv({ ...BASE, TESSERA_IDENTITY_CREDENTIAL: EXPIRED_TOKEN }, 'host'),
+    /TESSERA_IDENTITY_CREDENTIAL.*TOKEN, not a credential/s,
+  )
+  assert.throws(
+    () => loadEnv({ ...BASE, TESSERA_IDENTITY_CREDENTIAL: 'cfsc_changeme' }, 'host'),
+    /TESSERA_IDENTITY_CREDENTIAL/,
+  )
+})
+
+test('A HYPHENATED CREDENTIAL IS ACCEPTED — the testnet/mainnet asymmetry, pinned', () => {
+  // If this ever goes red because somebody reached for `assertGeneratedSecret`, the estate that
+  // breaks is testnet and mainnet stays green, which is the worst possible way to find out.
+  const env = loadEnv({ ...BASE, TESSERA_IDENTITY_CREDENTIAL: CREDENTIAL }, 'host')
+  assert.equal(env.identityCredential, CREDENTIAL)
+  assert.ok(CREDENTIAL.slice('cfsc_'.length).includes('-'), 'the fixture lost its hyphens')
+})
+
+test('ABSENT AND EMPTY ARE BOTH THE SUPPORTED MODE, and both read as null', () => {
+  // Compose interpolates `${TESSERA_IDENTITY_CREDENTIAL:-}`, so an unset credential arrives as the
+  // EMPTY STRING rather than as `undefined`. If that were not the absence, `upstreams.ts` would
+  // choose a mode by `env.x ? … : …` and agree with an operator who set the variable to nothing.
+  for (const source of [BASE, { ...BASE, TESSERA_IDENTITY_CREDENTIAL: '', TESSERA_SERVICE_CREDENTIAL: '   ' }]) {
+    const env = loadEnv(source, 'host')
+    assert.equal(env.identityCredential, null)
+    assert.equal(env.serviceCredential, null)
+  }
+})
+
+test('IDENTITY_URL defaults to the issuer, and is refused if it carries a path', () => {
+  // Required, but satisfiable from a variable every deployment already sets — so the exchange
+  // arrives with no manifest change and CI's smoke-env needs no new line. See the field comment.
+  assert.equal(loadEnv(BASE, 'host').identityUrl, BASE['IDENTITY_ISSUER'])
+  assert.equal(
+    loadEnv({ ...BASE, IDENTITY_URL: 'http://identity:4000' }, 'host').identityUrl,
+    'http://identity:4000',
+  )
+  // A path here would produce `POST /v1//service-tokens/exchange`, which 404s with nothing in
+  // either log naming the cause.
+  assert.throws(
+    () => loadEnv({ ...BASE, IDENTITY_URL: 'http://identity:4000/v1' }, 'host'),
+    /IDENTITY_URL must be an origin/,
   )
 })

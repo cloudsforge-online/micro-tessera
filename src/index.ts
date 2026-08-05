@@ -26,10 +26,9 @@ import { SCHEMA_VERSION } from './migrations.ts'
 import { createServer, registerServiceMetrics } from './server.ts'
 import { KILN_FIRE_KIND, registerHandlers, rescheduleRecurring, seedRecurring } from './jobs.ts'
 import { createPresenceHub } from './presence.ts'
-import { createStudioClient } from './studioclient.ts'
-import { createMarketClient } from './marketclient.ts'
-import { createCommunityClient, wardCommunitySlug } from './communityclient.ts'
-import { createLedgerClient, issueObjectToAuthor, walletOf } from './ledgerclient.ts'
+import { buildUpstreams } from './upstreams.ts'
+import { wardCommunitySlug } from './communityclient.ts'
+import { issueObjectToAuthor, walletOf } from './ledgerclient.ts'
 import { activateListing } from './economy.ts'
 import { bindWardCommunity } from './world.ts'
 import type { Db } from './outbox.ts'
@@ -117,84 +116,95 @@ const presence = await createPresenceHub(sql).catch((err: unknown) => {
 //    stops serving.
 const queue = new JobQueue(sql as unknown as JobsSql, { owner: env.instanceId })
 
-/**
- * The Kiln's upstream, if one is configured.
- *
- * Absent is a SUPPORTED mode — `env.ts` says so and the route answers 503 `kiln_unconfigured`
- * rather than 500. A world whose Kiln is cold is a world you can still walk around in, and the
- * alternative is a title that refuses to boot over one optional dependency.
- */
-const studio =
-  env.studioUrl && env.serviceCredential
-    ? createStudioClient({
-        baseUrl: env.studioUrl,
-        // A service token expires in ten minutes, so the token is a FUNCTION rather than a value.
-        // `@cloudsforge/auth`'s ServiceTokenProvider is the estate's answer to keeping one live;
-        // until this service is granted a credential in the deploy, the credential IS the token.
-        token: async () => env.serviceCredential ?? '',
-        // So a world object generated off the world's brief is a line somebody can find, rather
-        // than a chair that quietly does not match the ward it stands in.
-        logger: logger.child({ upstream: 'studio' }),
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// 7a. The upstreams, and the credential presented to two of the four.
+//
+// The BODY of this used to be here — `token: async () => env.serviceCredential ?? ''`, handed to
+// studio at :134 and to the ledger at :172 — and that is micro-org #222: a 600-second token
+// (`identity/src/tokens.ts:33`) read once at import and never renewed, measured expired for
+// twenty-six hours on a container whose `/livez` answered 200 throughout.
+//
+// It moved to `src/upstreams.ts` for one reason: wiring in a composition root is wiring no test can
+// reach. This file opens a pool, asserts a schema, opens a LISTEN connection and calls `listen()`,
+// so a test that imported it would start a server — which is why ninety-odd green tests could not
+// see a service that authenticated once and died. That file carries the whole argument, including
+// why market and community deliberately hold no credential and why no readiness probe is wired.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+const upstreams = buildUpstreams(env, {
+  // So a world object generated off the world's brief is a line somebody can find, rather than a
+  // chair that quietly does not match the ward it stands in.
+  studioLogger: logger.child({ upstream: 'studio' }),
+  onEvent: (event) => {
+    metrics.increment('tessera_service_token_events_total', { kind: event.kind })
+    if (event.kind === 'minted') {
+      // The token itself is never a field here, and must never become one. `service`, `expiresIn`
+      // and the refresh interval are what an operator needs; the bearer is what an attacker needs.
+      logger.info('minted a service token from the credential', {
+        service: event.service,
+        expiresIn: event.expiresIn,
+        refreshInMs: event.refreshInMs,
       })
-    : undefined
+    } else if (event.kind === 'exchange_failed') {
+      // `warn`, not `fatal`, and only because of `hadUsableToken`: a failed exchange while a live
+      // token is still held is exactly the outage the provider is built to ride out, and paging on
+      // it would page on every identity blip.
+      logger.warn('service credential exchange failed', { ...event })
+    }
+  },
+})
+const { studio, ledger, market, community } = upstreams
 
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Said at boot, at the level its consequence deserves, because the alternative is what actually
+// happened: a world that looks entirely healthy while its Kiln cannot fire and its treasury cannot
+// pay. `static` is FATAL and `none` is not, and the difference is the point — "no upstream is
+// configured" is a mode this service promises to support, while "an upstream is configured and the
+// credential cannot renew" is a container that will start refusing about ten minutes from now.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+const credentialedUpstream = Boolean(env.studioUrl ?? env.ledgerUrl)
+if (upstreams.mode === 'static') {
+  logger.fatal('EXPIRING TOKEN, NOT A CREDENTIAL — every Kiln firing and every EMBER grant will 401 about ten minutes from now', {
+    whatWillHappen:
+      'TESSERA_SERVICE_CREDENTIAL holds a token that lives 600s and nothing can renew it. From ' +
+      'minute ten studio refuses every firing, so a paid Kiln job dies in the runner and retries ' +
+      'into the same 401; the ledger refuses every engagement grant, every booking reservation and ' +
+      'every release, so a Venue hold is taken and cannot be returned. /livez keeps answering 200 ' +
+      'throughout, because it presents the credential to nobody.',
+    remedy:
+      'set TESSERA_IDENTITY_CREDENTIAL in the deploy; deploy/compose/estate/tokens.env already holds one',
+  })
+} else if (upstreams.mode === 'none' && credentialedUpstream) {
+  logger.fatal('AN UPSTREAM IS CONFIGURED AND NO CREDENTIAL IS — every call to it will answer 503', {
+    studioUrl: Boolean(env.studioUrl),
+    ledgerUrl: Boolean(env.ledgerUrl),
+    remedy: 'set TESSERA_IDENTITY_CREDENTIAL (long-lived, cfsc_…, from POST /service-credentials)',
+  })
+} else {
+  logger.info('service credential mode', {
+    mode: upstreams.mode,
+    identityUrl: env.identityUrl,
+  })
+}
+
+// The informational lines below are unchanged in substance: absent is a SUPPORTED mode. `env.ts`
+// says so and `.env.example` promises it — the Kiln answers 503 `kiln_unconfigured` and the world
+// still serves. A title that refused to boot over one optional dependency would be worse.
 if (!studio) {
   logger.info('no Kiln upstream configured; firings will answer 503', {
     studioUrl: Boolean(env.studioUrl),
-    credential: Boolean(env.serviceCredential),
+    credentialMode: upstreams.mode,
   })
 }
 
-/**
- * The market seam, and the ledger it needs.
- *
- * ══════════════════════════════════════════════════════════════════════════════════════════════
- * **BOTH, OR NEITHER.** Activating a listing does two things that must both be possible: it issues
- * the object into the creator's ledger balance, and it lists at market. Market's activation
- * reserves the item (`market/src/listings.ts`, `holdEscrow` with `kind: 'listing_item'`), so a
- * market configured without a ledger cannot activate anything — it would create a market draft,
- * fail at the reserve, and leave a dead draft behind on every attempt.
- *
- * So the seam is constructed only when BOTH upstreams and the credential are present, and the
- * route answers 503 otherwise. A half-configured seam that fails at step three is worse than an
- * absent one, because the absent one says so in the answer.
- *
- * Note the asymmetry with the tokens, which is deliberate and is the substance of this whole
- * feature: the LEDGER call uses this service's credential (issuing an object is the platform's
- * act), while both MARKET calls relay the seller's own bearer token, because market takes the
- * seller from the token and pays it. See `marketclient.ts`'s header.
- * ══════════════════════════════════════════════════════════════════════════════════════════════
- */
-const ledger =
-  env.ledgerUrl && env.serviceCredential
-    ? createLedgerClient({
-        baseUrl: env.ledgerUrl,
-        token: async () => env.serviceCredential ?? '',
-      })
-    : undefined
-
-const market =
-  env.marketUrl && ledger
-    ? createMarketClient({ baseUrl: env.marketUrl })
-    : undefined
-
 if (!market) {
+  // BOTH, OR NEITHER — see `upstreams.ts`. Market's activation reserves the item in the ledger, so
+  // a market configured without a ledger creates a dead draft on every attempt.
   logger.info('no market upstream configured; listings can be drafted but not activated', {
     marketUrl: Boolean(env.marketUrl),
     ledgerUrl: Boolean(env.ledgerUrl),
-    credential: Boolean(env.serviceCredential),
+    credentialMode: upstreams.mode,
   })
 }
-
-/**
- * Ward governance. `micro-community`, and nothing of it reimplemented here.
- *
- * No credential is held for this one, and that is not an omission: community's create route
- * refuses a service token outright and takes the owner from the caller's own, so the only token
- * that works is the founding operator's, relayed per request. There is nothing for this service to
- * hold.
- */
-const community = env.communityUrl ? createCommunityClient({ baseUrl: env.communityUrl }) : undefined
 
 if (!community) {
   logger.info('no community upstream configured; wards cannot be given a government', {
@@ -275,6 +285,20 @@ const server = createServer({
     const stats = await queue.stats()
     metrics.set('jobs_pending', stats.pending)
     metrics.set('jobs_overdue', stats.overdue)
+    // Read out of the provider's own memory — no outbound call, so a scrape cannot become load on
+    // identity. See `registerServiceMetrics` for why `static` reads as usable and why the second
+    // gauge is what stops that being a lie.
+    metrics.set(
+      'tessera_service_token_usable',
+      upstreams.mode === 'exchanged'
+        ? (upstreams.identityTokens?.snapshot().hasUsableToken ?? false)
+          ? 1
+          : 0
+        : upstreams.mode === 'static'
+          ? 1
+          : 0,
+    )
+    metrics.set('tessera_service_token_static', upstreams.mode === 'static' ? 1 : 0)
   },
 })
 

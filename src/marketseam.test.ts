@@ -607,14 +607,54 @@ test('the client calls the routes micro-market actually serves, read from its so
   )
 })
 
+/**
+ * Every source file this seam adds is REACHABLE from the composition root — walked, not assumed.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * This used to read `index.ts` alone and demand that it name each client file, which was true when
+ * the root constructed all three inline. micro-org #222 moved that construction into
+ * `upstreams.ts`, because wiring in the composition root is wiring no test can reach: `index.ts`
+ * opens a pool, asserts a schema and calls `listen()`, so a test importing it starts a server —
+ * which is exactly how a service that authenticated once at boot and died ten minutes later kept a
+ * green suite. See `upstreams.ts`'s header and `servicetoken.test.ts`.
+ *
+ * So the check now walks the edge it always MEANT: root → upstreams → client. One hop of hard-coded
+ * layout became two hops of followed imports, which is a stronger claim rather than a relaxed one —
+ * it fails both when a client stops being constructed AND when `upstreams.ts` stops being wired
+ * into the root, and the second of those is the failure that would silently restore the defect.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
 test('every source file this seam adds is reachable from the composition root', () => {
-  const root = readFileSync(new URL('./index.ts', import.meta.url), 'utf8')
-  for (const mod of ['marketclient.ts', 'communityclient.ts', 'ledgerclient.ts']) {
-    assert.ok(root.includes(`./${mod}`), `${mod} is never constructed, so it is never used`)
+  const read = (mod: string): string => readFileSync(new URL(`./${mod}`, import.meta.url), 'utf8')
+
+  // Hop one. The root must still reach the module that does the constructing, or the walk below is
+  // a walk over dead code.
+  const root = read('index.ts')
+  assert.ok(root.includes('./upstreams.ts'), 'the composition root no longer builds its upstreams')
+  assert.ok(root.includes('buildUpstreams('), 'upstreams.ts is imported but never called')
+
+  // Hop two. Reachable through EITHER file: `ledgerclient.ts` and `communityclient.ts` are also
+  // imported by the root directly, for `issueObjectToAuthor`, `walletOf` and `wardCommunitySlug`.
+  const upstreams = read('upstreams.ts')
+  for (const mod of ['marketclient.ts', 'communityclient.ts', 'ledgerclient.ts', 'studioclient.ts']) {
+    assert.ok(
+      root.includes(`./${mod}`) || upstreams.includes(`./${mod}`),
+      `${mod} is never constructed, so it is never used`,
+    )
   }
+  // And each client is actually CONSTRUCTED somewhere on that path, not merely imported for a type.
+  for (const factory of [
+    'createMarketClient(',
+    'createCommunityClient(',
+    'createLedgerClient(',
+    'createStudioClient(',
+  ]) {
+    assert.ok(upstreams.includes(factory), `${factory}) is never called, so that upstream is dead`)
+  }
+
   // itemasset.ts is reached through economy.ts rather than the root; assert that rather than
   // leaving it looking unreferenced.
-  const economy = readFileSync(new URL('./economy.ts', import.meta.url), 'utf8')
+  const economy = read('economy.ts')
   assert.ok(economy.includes('./itemasset.ts'))
   assert.ok(readdirSync(new URL('.', import.meta.url)).includes('itemasset.ts'))
 })

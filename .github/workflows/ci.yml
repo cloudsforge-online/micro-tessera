@@ -76,10 +76,27 @@ jobs:
       # claiming to be one. The two lines each get their OWN value, which is what proves they are
       # separate variables rather than one read twice.
       #
-      # The optional upstreams — STUDIO_URL, LEDGER_URL, MARKET_URL and TESSERA_SERVICE_CREDENTIAL —
-      # are deliberately absent: `.env.example` states that ABSENT IS A SUPPORTED MODE, the Kiln
-      # answers 503 `kiln_unconfigured` and every other route works. Setting them here would test a
-      # configuration no deployment uses and hide the one this service promises to survive.
+      # The optional upstreams — STUDIO_URL, LEDGER_URL, MARKET_URL, COMMUNITY_URL — and BOTH
+      # credential variables are deliberately absent: `.env.example` states that ABSENT IS A
+      # SUPPORTED MODE, the Kiln answers 503 `kiln_unconfigured` and every other route works.
+      # Setting them here would test a configuration no deployment uses and hide the one this
+      # service promises to survive.
+      #
+      # THAT IS A DELIBERATE CHOICE AFTER micro-org #222, NOT AN OVERSIGHT. The fix wires
+      # `ServiceTokenProvider` into the studio and ledger clients so a 600-second token
+      # (identity/src/tokens.ts:33) is exchanged and refreshed rather than read once at boot. It
+      # would have been easy to set a credential here and call the seam covered — but a smoke test
+      # cannot reach past ten minutes, so it would prove only that a string was present. The seam is
+      # proved in `src/servicetoken.test.ts` instead, which drives the real wiring through
+      # `buildUpstreams` with the clock ELEVEN MINUTES on and asserts the call costs zero 401s. What
+      # this job proves is the other half and the half only it can: that a container given no
+      # credential at all still boots and serves.
+      #
+      # IDENTITY_URL is absent for a different reason: `src/env.ts` requires it but DEFAULTS it to
+      # IDENTITY_ISSUER, which is already here and is identity's origin on both estates. A line
+      # would be redundant, and `src/env.test.ts` pins the default so it cannot silently stop.
+      #
+      # Nothing below was weakened to make this pass. The credential guard has no CI exemption.
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4100/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4100

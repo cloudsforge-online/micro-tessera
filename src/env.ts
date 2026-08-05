@@ -17,7 +17,11 @@
  */
 
 import { hostname } from 'node:os'
-import { assertGeneratedSecret, assertGeneratedSecretList } from '@cloudsforge/secrets'
+import {
+  assertGeneratedSecret,
+  assertGeneratedSecretList,
+  assertServiceCredential,
+} from '@cloudsforge/secrets'
 
 /**
  * The service's own name, from `service.ts` and NOT re-exported from here.
@@ -62,22 +66,22 @@ export class EnvError extends Error {
   }
 }
 
-/**
- * Values that must never be accepted. The list is short on purpose: it holds the strings that
- * actually appear in this repository's own `.env.example` and compose files, because those are
- * the ones that get copied into a deployment by someone in a hurry.
+/*
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * `PLACEHOLDERS` AND `requiredSecret` USED TO LIVE HERE, AND THEY ARE GONE RATHER THAN KEPT.
+ *
+ * They were a deny-list of nine exact strings plus a 24-character floor, and the only variable
+ * still reaching them was `TESSERA_SERVICE_CREDENTIAL` (micro-org #222). That guard PASSED a JWT:
+ * a service token is well over 24 characters and is on no list, so the estate booted a container
+ * holding a token that `identity/src/tokens.ts:33` gives 600 seconds to live, and which was
+ * measured on the live estate expired for **26 hours** while `/livez` answered 200 — because
+ * `/livez` verifies nothing and never presents the credential to anybody.
+ *
+ * A weak check that cannot fail reads as the absence of a problem, which is the same lesson
+ * `OUTBOX_SIGNING_SECRET` learned in micro-org #142. So the guard was not softened or lengthened,
+ * it was replaced by `optionalCredential` below, which refuses a JWT BY NAME.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
-const PLACEHOLDERS = new Set([
-  'changeme',
-  'change_me',
-  'change-me',
-  'placeholder',
-  'secret',
-  'dev-secret',
-  'dev-outbox-signing-secret',
-  'replace-with-a-real-secret',
-  'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-])
 
 type Source = Readonly<Record<string, string | undefined>>
 
@@ -87,37 +91,66 @@ function required(source: Source, name: string): string {
   return value
 }
 
-function requiredSecret(source: Source, name: string, minLength = 24): string {
-  const value = required(source, name)
-  if (PLACEHOLDERS.has(value.toLowerCase())) {
-    throw new EnvError(`${name} is set to a known placeholder — generate a real secret`)
-  }
-  // Length is a proxy for entropy and the only one available here. It is set above the point at
-  // which a human-chosen string is plausible, so a memorable password fails this check too.
-  if (value.length < minLength) {
-    throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
-  }
+/**
+ * A SERVICE CREDENTIAL that may be absent, but must be real if present.
+ *
+ * ── ABSENCE IS A SUPPORTED MODE, AND IT STAYS ONE ──────────────────────────────────────────────
+ *
+ * `null` rather than `undefined`, and rather than `''`: compose interpolates
+ * `${TESSERA_IDENTITY_CREDENTIAL:-}`, so an unset credential arrives as the EMPTY STRING. An empty
+ * string is falsy where a caller tests for it and truthy in `Object.keys`, so a mode chosen by
+ * `env.x ? … : …` would silently agree with an operator who set the variable to nothing. `null` is
+ * the absence, said once. The empty check therefore stays AHEAD of the assertion — this service
+ * promises that a Kiln with no upstream answers 503 `kiln_unconfigured` and the world still serves,
+ * and `migrator.ts` shares this environment while dialling nobody.
+ *
+ * What is not supported is a value that is present and rubbish. A 20-character placeholder is a
+ * deployment that believes it HAS a credential, and it fails on its first firing with a 401 that
+ * nothing in this repository distinguishes from studio being down.
+ *
+ * ── WHY NOT `assertGeneratedSecret` ────────────────────────────────────────────────────────────
+ *
+ * Because it would refuse every credential this estate has ever minted, and tessera would exit 1 at
+ * boot on BOTH networks. A credential is `cfsc_` + base64url, which is neither wholly base64 nor
+ * wholly hex — the underscore in its own prefix disqualifies it. Measured live: the **testnet**
+ * credential CONTAINS A HYPHEN while the mainnet one does not, so the "no hyphens" instinct that is
+ * correct for the signing keys above would have booted mainnet and killed testnet. `env.test.ts`
+ * pins a hyphenated fixture on purpose so that asymmetry fails CI rather than one estate.
+ *
+ * `assertServiceCredential` asserts what those rules cannot: the `cfsc_` prefix, placeholder
+ * markers checked on the BODY after the prefix is stripped, 32 decoded BYTES rather than keystrokes,
+ * an entropy floor — and, first of all, that the value is **not a JWT**. That last refusal is the
+ * whole of micro-org #222 for `TESSERA_SERVICE_CREDENTIAL`.
+ */
+function optionalCredential(source: Source, name: string): string | null {
+  const value = source[name]?.trim()
+  if (!value) return null
+  // `assertServiceCredential` throws `SecretError`, not `EnvError`, and that is deliberate rather
+  // than an oversight: `fatalConfig` reads `err.message` off `unknown`, so the boot line is
+  // identical either way, and re-wrapping would put this file's text between the operator and the
+  // guard's own — which names the variable, the defect and the command that mints a real one.
+  assertServiceCredential(name, value)
   return value
 }
 
 /**
  * The estate's shared event-bus HMAC key, held to a SHAPE rather than to a deny-list.
  *
- * `requiredSecret` above cannot be the guard for this one. It refuses a fixed list of exact strings
- * and anything under 24 characters, and the value that sat on 54 lines of a PUBLIC compose file —
- * `estate-only-outbox-secret-00000000000000` — was on no list and was 40 characters, so it passed
- * every service in the estate (micro-org #142). A check that could not fail read as the absence of
- * a problem.
+ * The deleted `requiredSecret` could not be the guard for this one. It refused a fixed list of exact
+ * strings and anything under 24 characters, and the value that sat on 54 lines of a PUBLIC compose
+ * file — `estate-only-outbox-secret-00000000000000` — was on no list and was 40 characters, so it
+ * passed every service in the estate (micro-org #142). A check that could not fail read as the
+ * absence of a problem.
  *
  * `assertGeneratedSecret` asserts what a placeholder cannot have: the base64 or hex alphabet (no
  * hyphens — every placeholder this estate wrote had one), 32 decoded BYTES rather than 24
  * keystrokes, and a measured Shannon entropy floor. It has no NODE_ENV exemption and no escape
  * hatch, so CI generates a real value per run rather than being let through.
  *
- * `required` rather than `requiredSecret`, deliberately: the weaker checks are a strict subset of
- * the stronger ones, and running them first would answer a 40-character placeholder with "must be
- * at least 24 characters" — a message that is true, useless, and points the operator at the wrong
- * property.
+ * `required` rather than a length-and-deny-list pre-check, deliberately: the weaker checks are a
+ * strict subset of the stronger ones, and running them first would answer a 40-character
+ * placeholder with "must be at least 24 characters" — a message that is true, useless, and points
+ * the operator at the wrong property.
  *
  * It throws `SecretError` rather than `EnvError`, and that is not an oversight: the class is
  * distinct so a configuration failure can be told from every other kind, and `fatalConfig` below
@@ -213,6 +246,27 @@ export interface Env {
   readonly databasePoolMax: number
   readonly identityJwksUrl: string
   readonly identityIssuer: string
+  /**
+   * Identity's ORIGIN, which is what `POST /service-tokens/exchange` is posted to.
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * **REQUIRED, AND IT DEFAULTS TO `IDENTITY_ISSUER` RATHER THAN BEING OPTIONAL.**
+   *
+   * The three variables above and this one are four spellings of one host, and only the JWKS URL
+   * carries a path. Making this optional would mean `upstreams.ts` had to decide what to do with a
+   * credential it has been given and an identity it cannot find — and the only honest answer to
+   * that is "refuse to start", which is what `required` says here in one line instead of three at
+   * the call site.
+   *
+   * Defaulting to `IDENTITY_ISSUER` rather than demanding a new variable is not laziness: this
+   * service already refuses to boot without the issuer, the issuer IS identity's origin on both
+   * estates, and every deployment therefore gains the exchange with no manifest change and no CI
+   * change. `IDENTITY_URL` exists as the override for the day the issuer becomes a public URL and
+   * the in-cluster address stops matching it. `market/src/env.ts:407` reads the same two variables
+   * the same way, and two services disagreeing about where identity lives is its own defect.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  readonly identityUrl: string
   /** HMAC key for outbound event signatures, so a subscriber can prove an event came from us. */
   readonly outboxSigningSecret: string
   /**
@@ -271,11 +325,47 @@ export interface Env {
    */
   readonly communityUrl: string | undefined
   /**
-   * The credential this service exchanges for a service token when it calls studio, ledger or
-   * market. Optional for the same reason the three URLs are; `requiredSecret` when present, so a
-   * placeholder credential cannot boot.
+   * The long-lived, revocable credential this service EXCHANGES for a service token when it calls
+   * studio or the ledger. `cfsc_…`, from `POST /service-credentials`.
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * **THIS IS THE FIX FOR micro-org #222, AND A LONGER EXPIRY WOULD NOT HAVE BEEN.**
+   *
+   * A service token lives 600 seconds (`identity/src/tokens.ts:33`) and nothing can renew it. A
+   * credential is exchanged for one at `POST /service-tokens/exchange`
+   * (`identity/src/server.ts:1615`), the exchange consumes nothing, and `ServiceTokenProvider`
+   * (`@cloudsforge/auth`) re-mints on traffic at a jittered 80% of each token's life. So N replicas
+   * boot from one credential and a restart days later still works. The 600 seconds is deliberately
+   * unchanged — rotation IS expiry, and lengthening the TTL leaves the same defect arriving later
+   * and hurting more.
+   *
+   * Optional for exactly the reason the four URLs are: a world with a cold Kiln is a world you can
+   * still walk around in. `null` is the supported absence, and `src/upstreams.ts` answers 503 at
+   * the routes that needed it rather than refusing to boot.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
    */
-  readonly serviceCredential: string | undefined
+  readonly identityCredential: string | null
+  /**
+   * A pre-minted service token, read once at boot. **A MIGRATION AID WITH A STATED END.**
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * This variable IS micro-org #222. `index.ts:134` and `:172` handed its value straight to the
+   * studio and ledger clients as their bearer — "until this service is granted a credential in the
+   * deploy, the credential IS the token" — and on the live estate it held a JWT that had been
+   * expired for **26 hours** on a container reporting healthy, because `/livez` never presents it
+   * to anybody.
+   *
+   * It survives only so that a container carrying the old variable and no new one keeps booting
+   * through the rolling deploy rather than exiting 1 mid-flight. It is now guarded by
+   * `optionalCredential`, so the JWT that was actually in it is refused BY NAME at boot: a
+   * deployment that has not migrated fails loudly at the door instead of quietly ten minutes later.
+   *
+   * **DELETE THIS FIELD, and `TESSERA_SERVICE_CREDENTIAL` with it, once no estate sets it.**
+   * `upstreams.ts` reports `mode: 'static'` while it is in use and `index.ts` logs `fatal` naming
+   * the consequence, which is how an operator knows the day has come.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  readonly serviceCredential: string | null
 }
 
 const LEVELS = new Set(['debug', 'info', 'warn', 'error'])
@@ -289,7 +379,6 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
   if (!LEVELS.has(logLevel)) {
     throw new EnvError(`LOG_LEVEL must be one of debug, info, warn, error (got ${logLevel})`)
   }
-  const credential = source['TESSERA_SERVICE_CREDENTIAL']?.trim()
   return {
     port: integer(source, 'PORT', DEFAULT_PORT, 1, 65_535),
     env: optional(source, 'NODE_ENV', 'development'),
@@ -301,6 +390,11 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     databasePoolMax: integer(source, 'TESSERA_DATABASE_POOL_MAX', 10, 1, 100),
     identityJwksUrl: required(source, 'IDENTITY_JWKS_URL'),
     identityIssuer: required(source, 'IDENTITY_ISSUER'),
+    // `optionalOrigin` when set — so a value with a path is refused here rather than producing a
+    // `POST /v1//service-tokens/exchange` that 404s with nothing naming the cause — and the issuer
+    // when it is not. See the field comment for why this defaults instead of being a fifth
+    // required variable.
+    identityUrl: optionalOrigin(source, 'IDENTITY_URL') ?? required(source, 'IDENTITY_ISSUER'),
     outboxSigningSecret: requiredSigningSecret(source, 'OUTBOX_SIGNING_SECRET'),
     inboundSigningSecrets: requiredSecretList(source, 'INBOUND_SIGNING_SECRET'),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
@@ -308,7 +402,8 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     ledgerUrl: optionalOrigin(source, 'LEDGER_URL'),
     marketUrl: optionalOrigin(source, 'MARKET_URL'),
     communityUrl: optionalOrigin(source, 'COMMUNITY_URL'),
-    serviceCredential: credential ? requiredSecret(source, 'TESSERA_SERVICE_CREDENTIAL') : undefined,
+    identityCredential: optionalCredential(source, 'TESSERA_IDENTITY_CREDENTIAL'),
+    serviceCredential: optionalCredential(source, 'TESSERA_SERVICE_CREDENTIAL'),
   }
 }
 

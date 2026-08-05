@@ -198,6 +198,40 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
       kind: 'counter',
       labels: ['outcome'],
     })
+    /*
+     * ══════════════════════════════════════════════════════════════════════════════════════════
+     * THE THREE SERIES THAT WOULD HAVE ANSWERED micro-org #222 ON THE DAY IT STARTED.
+     *
+     * `TESSERA_SERVICE_CREDENTIAL` held a JWT that had been expired for twenty-six hours on a
+     * container reporting healthy. Nothing anywhere could answer "can this process authenticate
+     * right now", because `/livez` presents the credential to nobody and every other signal — the
+     * probe, the job runner, the request metrics — is about work that never leaves this service.
+     *
+     * `usable` is read out of the provider's own memory at scrape time; there is no timer and no
+     * outbound call, so a scrape cannot itself become load on identity. `static` counts as usable
+     * because it IS — for about ten minutes — which is exactly why it needs the second gauge beside
+     * it rather than a kinder reading of the first. Together they answer both halves: can this
+     * process authenticate, and is it even ABLE to renew.
+     * ══════════════════════════════════════════════════════════════════════════════════════════
+     */
+    .register({
+      name: 'tessera_service_token_usable',
+      help: 'Whether an outbound call right now would be authenticated without waiting',
+      kind: 'gauge',
+      labels: [],
+    })
+    .register({
+      name: 'tessera_service_token_static',
+      help: 'Whether this process holds an un-renewable pre-minted token (micro-org #222)',
+      kind: 'gauge',
+      labels: [],
+    })
+    .register({
+      name: 'tessera_service_token_events_total',
+      help: 'Service credential exchanges, refusals and 401 replays',
+      kind: 'counter',
+      labels: ['kind'],
+    })
 }
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/
