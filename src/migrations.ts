@@ -1831,6 +1831,306 @@ export const MIGRATIONS: readonly Migration[] = [
         for each row execute function tessera_assert_booking_terms_unchanged();
     `,
   },
+
+  {
+    version: 15,
+    name: 'an_erased_subject_is_a_shape_the_schema_admits_and_never_lets_back',
+    up: `
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- RIGHT TO ERASURE (GDPR Art. 17), AS A SCHEMA SHAPE RATHER THAN A HANDLER'S PROMISE.
+      --
+      -- Rule 6 of docs/ecosystem/03 §2: every service storing a \`user_id\` subscribes to
+      -- \`identity.user.deleted\` and erases. This title could not, and the reason was structural
+      -- rather than an oversight: NINE columns carry
+      -- \`references accounts (subject) on delete restrict\` — \`parcels.owner_subject\`,
+      -- \`contests.challenger_subject\`, \`objects.author_subject\`, \`placements.placed_by\`,
+      -- \`listings.seller_subject\`, \`bookings.booked_by\`, \`engagement_grants.beneficiary\`,
+      -- \`beacons.lit_by\` and \`entitlements.subject\` — so the account row CANNOT simply be
+      -- deleted, and a land registry that forgot who holds a parcel would not be a title anyone
+      -- could play. Cascading instead would delete other people's world: \`placements.object_id\`
+      -- is itself \`on delete restrict\` against \`objects\`, so erasing an author would take the
+      -- chairs out of the parcels of everyone who ever placed one.
+      --
+      -- So erasure here is REPOINT-THEN-DELETE. \`src/erasure.ts\` mints one random placeholder
+      -- per erasure — \`erased:<uuid v4>\`, from \`randomUUID()\`, never derived from the user id
+      -- because a hash of a uuid is brute-forceable over the candidate set — inserts it as an
+      -- account, repoints every retained row onto it, and then deletes the person's row. Nothing
+      -- anywhere stores the mapping, so nothing anywhere can undo it.
+      --
+      -- THIS MIGRATION IS THE HALF THAT MUST LIVE IN THE DATABASE: two CHECKs currently refuse
+      -- the placeholder outright, and without the two triggers below "anonymised" would mean
+      -- "renamed, and renameable back".
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      -- \`accounts_subject_is_a_user\` (migration 4) admits only \`user:%\`, which is exactly what
+      -- kept the placeholder out. The replacement admits two shapes and no third.
+      --
+      -- The \`user:%\` branch stays LOOSE on purpose. Tightening it to a uuid regex here would be
+      -- a second, unrelated change smuggled into a GDPR migration, and it would refuse rows that
+      -- already exist: fixtures across this repository use \`user:alice\`, and a released
+      -- migration cannot be edited when that turns out to matter in production.
+      --
+      -- The \`erased:\` branch is pinned EXACTLY — a literal prefix and a full uuid, anchored at
+      -- both ends. That asymmetry is the point rather than an inconsistency: it makes an erased
+      -- subject STRUCTURALLY DISTINGUISHABLE from a person's, so "is this row still attached to
+      -- somebody" is a question the database answers rather than a convention a reader has to
+      -- trust. It also means no operator can hand-write a plausible-looking \`erased:someone\`
+      -- and quietly re-attribute a row to a name.
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      alter table accounts drop constraint if exists accounts_subject_is_a_user;
+      alter table accounts add constraint accounts_subject_is_a_user check (
+        subject like 'user:%'
+        or subject ~ '^erased:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      );
+
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      -- THE SAME WIDENING ON \`visits\`, AND THE ORIGINAL ARGUMENT IS PRESERVED WORD FOR WORD
+      -- BECAUSE THE RULE IT ENFORCES IS NOT BEING WEAKENED.
+      --
+      -- \`tessera_footfall_is_never_synthetic\` (migration 7) exists for this reason, quoted from
+      -- §8.6 exactly as migration 7 quotes it:
+      --
+      --   "Tessera adds the world-specific version of the same rule: no synthetic footfall,
+      --   because footfall is the ranking signal (§6.5) and a platform that fakes footfall is a
+      --   platform rigging its own discovery."
+      --
+      --   "This is the world half: a visit by \`platform\`, \`platform:engagement-treasury\` or any
+      --   \`engagement:<service>\` subject cannot be written at all."
+      --
+      -- THAT REMAINS TRUE AFTER THIS MIGRATION. \`platform\`, \`platform:engagement-treasury\` and
+      -- \`engagement:<service>\` match neither branch, so the platform still cannot write a visit,
+      -- and there is still no statement that could.
+      --
+      -- An \`erased:\` visit is not synthetic. It is A REAL PERSON'S VISIT WITH THE IDENTITY
+      -- REMOVED — a human being walked onto that parcel on that day, and the only thing this
+      -- migration allows is for the row to stop saying who. Nobody may read this widening as
+      -- abandoning §8.6; the alternative, DELETING the visits, is the change that would actually
+      -- corrupt the signal, because it would retroactively lower a parcel's footfall and move
+      -- other people's discovery ranking and fallow clocks (§4) years after the fact.
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      alter table visits drop constraint if exists tessera_footfall_is_never_synthetic;
+      alter table visits add constraint tessera_footfall_is_never_synthetic check (
+        visitor_subject like 'user:%'
+        or visitor_subject ~ '^erased:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      );
+
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      -- AND THE THIRD ONE, WHICH THE DESIGN FOR THIS WORK DID NOT LIST: \`outbox_actor_shape\`.
+      --
+      -- The outbox is NEVER PURGED — the relay sets \`published_at\` and the row stays for ever
+      -- (\`outbox.ts:311\`) — and it records \`actor = 'user:<uuid>'\` with the subject repeated
+      -- inside \`payload\` (\`world.ts:442\`, \`:450\`, \`:683\`, \`economy.ts:803\`, \`kiln.ts:333\`).
+      -- Left alone, \`select actor, payload from outbox\` would hand anybody the erased person's
+      -- subject NEXT TO the parcel and object ids now held by their placeholder: a complete
+      -- re-identification join, in this database, undoing the erasure in one query.
+      --
+      -- So \`erasure.ts\` anonymises the outbox too, and migration 9's
+      -- \`check (actor = 'system' or actor ~ '^(user|service|operator):.+$')\` is what would
+      -- otherwise refuse the rewrite with 23514 — a HARD FAILURE of the whole erasure, not a
+      -- quiet leak. \`system\`, \`user:\`, \`service:\` and \`operator:\` all keep their exact
+      -- meanings; one more alternative is added, pinned to a full uuid like the other two above.
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      alter table outbox drop constraint if exists outbox_actor_shape;
+      alter table outbox add constraint outbox_actor_shape check (
+        actor = 'system'
+        or actor ~ '^(user|service|operator):.+$'
+        or actor ~ '^erased:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      );
+
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      -- \`presence_is_a_person\` (migration 7) IS DELIBERATELY LEFT ALONE, and the silence would
+      -- otherwise read as an oversight.
+      --
+      -- Presence rows are DELETED by an erasure, not anonymised — a presence row is an ephemeral
+      -- live position in a ward, it holds no invariant anybody else depends on, and there is no
+      -- lawful basis to keep one for a person who no longer exists. So no \`erased:\` subject is
+      -- ever written to \`presence\`, and widening its CHECK would admit a shape that erasure
+      -- never produces. The constraint keeps its exact original meaning: a row in \`presence\` is
+      -- a person, standing somewhere, right now.
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- ERASURE IS ONE-WAY, ENFORCED, NOT PROMISED.
+      --
+      -- Widening a CHECK to admit \`erased:\` would, on its own, buy nothing: \`update accounts set
+      -- subject = 'user:<the same person>' where subject = 'erased:...'\` would satisfy every
+      -- constraint above. "Anonymised" would mean "renamed", and a rename is reversible by anyone
+      -- with a psql prompt.
+      --
+      -- These two triggers are what make the erasure irreversible. Once a subject is \`erased:\`,
+      -- it cannot be changed to ANYTHING — not back to the original \`user:\` value, not to a
+      -- different erased value, not to a second person. There is no statement that re-attributes
+      -- an erased row to a human being.
+      --
+      -- BEFORE UPDATE rather than a deferred \`create constraint trigger\`: there is no bulk shape
+      -- that benefits from deferring this to commit, and an immediate raise names the offending
+      -- row rather than the transaction — the same reasoning migration 4 gives for making the
+      -- contest window check \`initially immediate\`.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create or replace function tessera_assert_erasure_is_one_way() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if old.subject like 'erased:%' and new.subject is distinct from old.subject then
+          raise exception
+            'an erased subject can never be re-attributed to a person (GDPR Art. 17, migration 15)'
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists accounts_erasure_is_one_way on accounts;
+      create trigger accounts_erasure_is_one_way
+        before update on accounts
+        for each row execute function tessera_assert_erasure_is_one_way();
+
+      -- \`visits\` carries the subject under a different column name and has NO foreign key to
+      -- \`accounts\` (it is part of the primary key), so the trigger above does not reach it and a
+      -- second function is needed rather than a second trigger on the first one.
+      create or replace function tessera_assert_visit_erasure_is_one_way() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if old.visitor_subject like 'erased:%'
+           and new.visitor_subject is distinct from old.visitor_subject then
+          raise exception
+            'an erased visitor can never be re-attributed to a person (GDPR Art. 17, migration 15)'
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists visits_erasure_is_one_way on visits;
+      create trigger visits_erasure_is_one_way
+        before update on visits
+        for each row execute function tessera_assert_visit_erasure_is_one_way();
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- AUTHORSHIP IS STILL FINAL. IT NOW HAS EXACTLY ONE PERMITTED TRANSITION, AND IT IS A
+      -- ONE-WAY DOOR OUT OF BEING A PERSON.
+      --
+      -- \`objects_authorship_is_final\` (migration 5) refuses ANY change to \`author_subject\`, and
+      -- its reason is quoted here because it is still the reason: "An UPDATE that re-points it is
+      -- the forgeable owner field coming back in through a different column, and it is the single
+      -- edit that would undo §9.2."
+      --
+      -- That collides head-on with Art. 17: the author's subject IS the author's identity, the
+      -- object cannot be deleted (\`placements.object_id\` is \`on delete restrict\`, so deleting it
+      -- would destroy other players' parcels), and the trigger refuses the only remaining answer.
+      -- Something has to give, and the question is what exactly.
+      --
+      -- WHAT §9.2 IS ACTUALLY PROTECTING is attribution: nobody may take the credit for somebody
+      -- else's file, and no edit may quietly move a work from one author to another. Erasure does
+      -- not do that. It moves an author to NOBODY — a placeholder no person can ever hold, that
+      -- no login reaches, and that migration 15's \`accounts_erasure_is_one_way\` trigger has
+      -- already frozen. The credit is not transferred; it is retired.
+      --
+      -- So the rule is narrowed to the smallest opening that admits an erasure and nothing else:
+      --
+      --   * \`user:alice\` -> \`erased:<uuid>\`   ALLOWED. This, and only this.
+      --   * \`user:alice\` -> \`user:bob\`        REFUSED. The forgery §9.2 exists to stop.
+      --   * \`erased:<uuid>\` -> anything        REFUSED. Erasure does not run backwards, so an
+      --                                         erased work can never be re-attributed to a
+      --                                         person — not even the original one.
+      --
+      -- The checksum half of the trigger is copied across UNCHANGED. It is a rule about bytes and
+      -- has nothing to do with identity, and rewriting it here would be an unrelated change
+      -- smuggled into a GDPR migration.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create or replace function tessera_guard_authorship() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if new.author_subject is distinct from old.author_subject then
+          if not (old.author_subject like 'user:%'
+                  and new.author_subject ~ '^erased:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+          then
+            raise exception
+              'object % has an author of record — authorship is a fact about the file (23-tessera.md §9.2); the only permitted change is erasure',
+              old.id
+              using errcode = 'check_violation';
+          end if;
+        end if;
+        -- The bytes are the identity, so re-pointing a fired object at different bytes is
+        -- creating a different object while keeping the first one's provenance and sales.
+        if old.checksum is not null and new.checksum is distinct from old.checksum then
+          raise exception
+            'object % is addressed by its bytes — they do not change', old.id
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      -- A BOOKING'S TERMS ARE STILL WRITTEN ONCE. THE BOOKER MAY BECOME NOBODY, AND NOTHING ELSE
+      -- MAY MOVE AT ALL.
+      --
+      -- The same collision as authorship above, one migration newer.
+      -- \`bookings_terms_are_written_once\` (migration 14) refuses any change to \`parcel_id\`,
+      -- \`slot\`, \`hours\`, \`booked_by\`, \`price_wei\` or \`reservation_id\`, and its reason stands:
+      -- those six ARE the agreement, and a repriced or re-pointed booking is a hold on somebody
+      -- else's calendar at a number they never agreed to.
+      --
+      -- \`booked_by\` gains the one erasure transition and the other five gain nothing. That
+      -- ordering matters: the money half of the agreement — the price, the hold, the span — is
+      -- exactly as frozen after this migration as before it, which is what lets the booking be
+      -- RETAINED under Art. 17(3)(b) rather than deleted. A booking whose terms could be edited
+      -- during an erasure would not be a financial record worth keeping.
+      --
+      -- \`user:%\` -> \`erased:<uuid>\` only, in that direction only, exactly as authorship above.
+      -- ═══════════════════════════════════════════════════════════════════════════════════════
+      create or replace function tessera_assert_booking_terms_unchanged() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if new.parcel_id      is distinct from old.parcel_id
+        or new.slot           is distinct from old.slot
+        or new.hours          is distinct from old.hours
+        or new.price_wei      is distinct from old.price_wei
+        or new.reservation_id is distinct from old.reservation_id then
+          raise exception
+            'booking % is written once — its parcel, span, booker, price and hold do not change (bookings_terms_are_written_once)',
+            old.id
+            using errcode = 'check_violation';
+        end if;
+        if new.booked_by is distinct from old.booked_by then
+          if not (old.booked_by like 'user:%'
+                  and new.booked_by ~ '^erased:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+          then
+            raise exception
+              'booking % is written once — its booker does not change, except to be erased (bookings_terms_are_written_once)',
+              old.id
+              using errcode = 'check_violation';
+          end if;
+        end if;
+        if old.status <> 'open' and new.status is distinct from old.status then
+          raise exception
+            'booking % is already % — a closed booking does not move again (bookings_terms_are_written_once)',
+            old.id, old.status
+            using errcode = 'check_violation';
+        end if;
+        return new;
+      end;
+      $$;
+
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+      -- NO THIRD TRIGGER ON \`outbox.actor\`, AND THAT IS A DECISION RATHER THAN AN OMISSION.
+      --
+      -- Two reasons, and the second is the one that decides it. First, the outbox is a DERIVED
+      -- spool: the authoritative subject lives in \`accounts\`, \`parcels\` and the rest, all of
+      -- which are already covered, and re-attributing a spool row would re-attribute a copy of a
+      -- fact whose original is protected. Second, and concretely: the relay UPDATES this table
+      -- on every single published event (\`update outbox set published_at = now()\`,
+      -- \`outbox.ts:311\`), so a row-level BEFORE UPDATE trigger here is a per-event cost on the
+      -- hottest write path in the service, paid for ever, to guard a copy. The widened CHECK
+      -- above still holds: nothing can put an arbitrary string in this column.
+      -- ─────────────────────────────────────────────────────────────────────────────────────
+    `,
+  },
 ]
 
 /**

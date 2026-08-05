@@ -208,6 +208,10 @@ const server = createServer({
   metrics,
   verifier: new Verifier({ jwksUrl: env.identityJwksUrl, issuer: env.identityIssuer }),
   sql,
+  // The receiving half of the estate's event signing. The SAME list `env.ts` documents at length
+  // — one variable, parsed to a list so a rotation has an overlap window — and not a second
+  // secret invented for this route.
+  eventAcceptSecrets: env.inboundSigningSecrets,
   ...(presence ? { presence } : {}),
   ...(market && ledger
     ? {

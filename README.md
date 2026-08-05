@@ -29,6 +29,19 @@ Binds **4022**. Schema version **10**.
 | `POST /v1/listings` | as above |
 | `POST/DELETE /v1/wards/:id/presence` `POST /v1/parcels/:id/visits` `…/beacons` | as above |
 | `GET /v1/me/parcels` | as above |
+| `POST /v1/events` | **no token — the HMAC is the credential.** The estate's inbound event webhook, signed with `INBOUND_SIGNING_SECRET` and verified over the raw bytes *before* the body is parsed. A bad or missing signature is **403, never 401**: there is no bearer that opens this route and no token endpoint to go and find one at, so a 401 would be advice that leads nowhere. Absent, expired and forged are deliberately indistinguishable. An authentic delivery on a topic this service does not consume is `202 ignored`, never a 4xx — a 4xx would make the producer's relay retry for ever |
+
+### The events it consumes
+
+`src/topics.ts` holds the list; each name is a `TopicName`, so a topic the registry does not know
+does not compile.
+
+| Topic | What it does |
+| --- | --- |
+| `market.listing.sold` | marks the listing sold |
+| `community.proposal.executed` | applies a ward `parameter_change` — §10.2 |
+| `billing.entitlement.granted` / `.revoked` | the six SKUs of §7.3 |
+| `identity.user.deleted` | **right to erasure (GDPR Art. 17).** Rule 6 of `docs/ecosystem/03 §2`. `src/erasure.ts` holds the per-table decision and the lawful basis for every row that survives; migration 15 holds the half that must be in the schema. Deletes `entitlements`, `presence` and draft `listings`; anonymises everything else onto one random `erased:<uuid>` placeholder, then deletes the account for real. Because nine columns reference `accounts` `on delete restrict`, that final delete raises `23503` if a table were missed — the database, not a checklist, is what proves the coverage is total |
 
 ## The invariants that are not in this code
 

@@ -47,9 +47,11 @@ import {
   serialiseProvisionResult,
   serialiseTitleDescriptor,
 } from '@cloudsforge/contracts-worlds'
+import { EVENT_ID_HEADER, SIGNATURE_HEADER } from '@cloudsforge/contracts-events'
 import type { Lifecycle } from '@cloudsforge/lifecycle'
 import { Metrics, newRequestId, type Logger } from '@cloudsforge/telemetry'
 import { PROVISION_SCOPE, READ_SCOPE, WRITE_SCOPE } from './scopes.ts'
+import { handleDelivery } from './inbound.ts'
 import type { Db } from './outbox.ts'
 import {
   bankParcel,
@@ -157,6 +159,23 @@ export interface ServerDeps {
    * repository — the shape rule 8 exists to keep out. A scrape is already periodic.
    */
   readonly beforeScrape?: () => Promise<void>
+  /**
+   * Every secret that may have signed an inbound delivery to `POST /v1/events`, newest first.
+   *
+   * `env.inboundSigningSecrets` — the SAME list the relay's receiver end reads, not a second
+   * variable, because a second variable is a second thing to rotate and the estate has one
+   * outbox secret shared by 24 services. See `env.ts` on why this is a list rather than a value:
+   * swapping a single key partitions deliveries for the length of a rolling deploy, and the
+   * failure reads as a secret mismatch rather than as a deploy ordering problem.
+   *
+   * **Not optional, unlike every other seam above.** The Kiln, the market, the wallet and ward
+   * governance are all absent-is-a-supported-mode, because a world you cannot sell in is still a
+   * world you can walk around in. The inbox is not like that: an unconfigured inbox would mean
+   * `identity.user.deleted` had no route to arrive on, and a right-to-erasure request would go on
+   * reporting success while changing nothing — which is the exact defect this route was added to
+   * end. There is no degraded mode of GDPR compliance.
+   */
+  readonly eventAcceptSecrets: readonly string[]
 }
 
 export function registerServiceMetrics(metrics: Metrics): Metrics {
@@ -1168,6 +1187,60 @@ function buildRoutes(): Route[] {
         },
       }
     }),
+
+    /* ----------------------------------------------------------------------------- the inbox */
+
+    /**
+     * The inbound event webhook — the address every producer's relay delivers to.
+     *
+     * ══════════════════════════════════════════════════════════════════════════════════════
+     * **THIS ROUTE DOES NOT CHECK THE SIGNATURE, AND THAT IS THE SECURITY PROPERTY.**
+     *
+     * `handleDelivery` does, over the RAW BYTES, before `JSON.parse` is reached — see the header
+     * of `inbound.ts`. A second implementation here would be a second thing to keep correct,
+     * and the way it would go wrong is known in advance: this handler would parse the body to
+     * inspect it, re-serialise, and verify the MAC over bytes that are not the bytes that were
+     * signed. `JSON.parse` then `JSON.stringify` is not the identity function, so every honest
+     * delivery would be refused and the failure would look like a secret mismatch.
+     *
+     * So the ONLY thing this route does with the body is read it as raw bytes and hand it over
+     * unparsed. `readRaw` returns a string rather than an object for exactly that reason, and
+     * `handleDelivery`'s signature takes a string so that passing a re-serialised body is
+     * unrepresentable rather than merely discouraged.
+     *
+     * **`inbound.ts` EXISTED, COMPLETE AND CORRECT, AND WAS WIRED TO NOTHING.** Until this
+     * route it was referenced only by `outbox.test.ts` — a fully tested inbox that no producer
+     * could reach, so `identity.user.deleted` had nowhere to arrive and a right-to-erasure
+     * request changed nothing. A tested module is not a served route.
+     * ══════════════════════════════════════════════════════════════════════════════════════
+     */
+    define('POST', '/v1/events', async (ctx, deps) => {
+      const raw = await readRaw(ctx.req)
+      const verdict = await handleDelivery(
+        { sql: deps.sql, logger: ctx.log, secrets: deps.eventAcceptSecrets },
+        raw,
+        {
+          [SIGNATURE_HEADER]: headerOf(ctx.req, SIGNATURE_HEADER),
+          [EVENT_ID_HEADER]: headerOf(ctx.req, EVENT_ID_HEADER),
+        },
+      )
+
+      if (verdict.status === 403) {
+        // The MAC is the credential, so a caller without it is refused rather than challenged —
+        // `inbound.ts` has the argument. The message is the same whether the signature was
+        // absent, expired or forged: telling an attacker which half failed tells them which half
+        // to fix.
+        return errorReply(403, 'bad_signature', 'the event signature did not verify', ctx.requestId)
+      }
+      if (verdict.status === 400) {
+        return errorReply(400, 'malformed_envelope', verdict.detail, ctx.requestId)
+      }
+      // 200 processed/duplicate and 202 unregistered/ignored, passed through as the inbox judged
+      // them. The 202s are NOT errors and must never become 4xx: an unsubscribed or unregistered
+      // topic is a configuration fact the producer cannot fix by retrying, and a 4xx would make
+      // its relay retry the same event for ever.
+      return { status: verdict.status, body: { status: verdict.outcome } }
+    }),
   ]
 }
 
@@ -1317,6 +1390,31 @@ function requireInteger(
     throw new BadRequestError(`${field} must be a whole number between ${min} and ${max}`)
   }
   return value
+}
+
+/**
+ * The body as THE EXACT BYTES THE SOCKET CARRIED, decoded once as utf-8 and not parsed.
+ *
+ * For the inbox, and for nothing else. The MAC is computed over these bytes, so anything that
+ * normalises them — parsing, re-serialising, trimming — destroys the only thing that can verify
+ * the delivery. `readJson` below is the wrong tool for that surface no matter how convenient it
+ * looks, which is why this is a separate function rather than a flag on that one.
+ *
+ * The same `MAX_BODY_BYTES` cap, applied before buffering rather than after, for the same reason
+ * `readJson` applies it: an unbounded body is a memory exhaustion primitive, and this route is
+ * reachable by anyone who can open a socket — the signature check happens after the read, because
+ * there is nothing to check until the bytes are here.
+ */
+async function readRaw(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer
+    size += buffer.length
+    if (size > MAX_BODY_BYTES) throw new BadRequestError('request body too large')
+    chunks.push(buffer)
+  }
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {

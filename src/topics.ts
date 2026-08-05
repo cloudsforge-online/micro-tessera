@@ -89,9 +89,24 @@ export const MARKET_LISTING_SOLD: TopicName = 'market.listing.sold'
 export const BILLING_ENTITLEMENT_GRANTED: TopicName = 'billing.entitlement.granted'
 export const BILLING_ENTITLEMENT_REVOKED: TopicName = 'billing.entitlement.revoked'
 
+/**
+ * A user exercised their right to erasure. `src/erasure.ts` does the work.
+ *
+ * Rule 6 of docs/ecosystem/03 §2 — "every service storing a `user_id` subscribes to
+ * `identity.user.deleted` and erases" — and this service stores a subject in FOURTEEN places
+ * while subscribing to nothing, so a deletion request reported success and changed nothing.
+ *
+ * The registry keys this topic `by 'user_id'` and identity puts the user id in the envelope key,
+ * but the handler reads `payload.userId` rather than `envelope.key`: the key is the ORDERING
+ * PARTITION, and reading it as data is the precise mistake custody made (see the header of this
+ * file). The payload field is the contract.
+ */
+export const IDENTITY_USER_DELETED: TopicName = 'identity.user.deleted'
+
 export const CONSUMED: readonly TopicName[] = Object.freeze([
   COMMUNITY_PROPOSAL_EXECUTED,
   MARKET_LISTING_SOLD,
   BILLING_ENTITLEMENT_GRANTED,
   BILLING_ENTITLEMENT_REVOKED,
+  IDENTITY_USER_DELETED,
 ])

@@ -39,11 +39,12 @@ import type { Logger } from '@cloudsforge/telemetry'
 import type { Db, Tx } from './outbox.ts'
 import { withInbox } from './outbox.ts'
 import { markSold } from './economy.ts'
+import { eraseUser } from './erasure.ts'
 import { CONSUMED } from './topics.ts'
 
 export type InboundVerdict =
   | { readonly status: 200 | 202; readonly outcome: 'processed' | 'duplicate' | 'unregistered' | 'ignored' }
-  | { readonly status: 400 | 401; readonly outcome: 'malformed' | 'unauthenticated'; readonly detail: string }
+  | { readonly status: 400 | 403; readonly outcome: 'malformed' | 'unauthenticated'; readonly detail: string }
 
 export interface InboundDeps {
   readonly sql: Db
@@ -66,7 +67,23 @@ export async function handleDelivery(
 ): Promise<InboundVerdict> {
   const presented = headers[SIGNATURE_HEADER]
   if (!presented) {
-    return { status: 401, outcome: 'unauthenticated', detail: `no ${SIGNATURE_HEADER}` }
+    // ════════════════════════════════════════════════════════════════════════════════════════
+    // 403, NOT 401 — AND THE SAME 403 AS A FORGED SIGNATURE BELOW.
+    //
+    // 401 means "authenticate and try again", which on this surface is advice that leads
+    // nowhere: there is no bearer token that opens this route, no WWW-Authenticate challenge to
+    // answer, and no token endpoint to go and find one at. **The MAC is the credential.** A
+    // caller without the estate signing secret is not unauthenticated, it is refused, and
+    // `trade/src/server.ts:726-731` is the estate's reference implementation of exactly this
+    // choice: "Not 401: this is not a bearer-token surface, and answering 401 would invite a
+    // caller to go and find a token."
+    //
+    // The detail says WHICH HEADER IS ABSENT and nothing more. That is not a leak — an attacker
+    // who has not sent the header already knows they have not sent it — but past this point
+    // every refusal is a bare `signature`, because "expired" versus "forged" tells them which
+    // half to fix.
+    // ════════════════════════════════════════════════════════════════════════════════════════
+    return { status: 403, outcome: 'unauthenticated', detail: `no ${SIGNATURE_HEADER}` }
   }
 
   // Multi-secret rotation and the 5-minute freshness window both live in the contract's verifier,
@@ -80,9 +97,11 @@ export async function handleDelivery(
   // on a fact rather than on a wait. `.some()` throws that answer away.
   const verified = verifyDelivery(raw, presented, deps.secrets)
   if (!verified.ok) {
-    // The reason is not returned. "Expired" versus "forged" tells an attacker which half to fix.
+    // The reason is not returned. "Expired" versus "forged" tells an attacker which half to fix,
+    // so both failures produce this one indistinguishable verdict — same status, same detail
+    // string, same log line.
     deps.logger.info('rejected an unsigned or badly signed delivery')
-    return { status: 401, outcome: 'unauthenticated', detail: 'signature' }
+    return { status: 403, outcome: 'unauthenticated', detail: 'signature' }
   }
   if (verified.keyIndex > 0) {
     // The index, never the key. A producer still signing with a rotated-out secret is the one
@@ -125,7 +144,7 @@ export async function handleDelivery(
   }
 
   const outcome = await withInbox(deps.sql, envelope.topic, eventId, async (tx) => {
-    await apply(tx, envelope)
+    await apply(deps, tx, envelope)
   })
   return { status: 200, outcome: outcome.status === 'duplicate' ? 'duplicate' : 'processed' }
 }
@@ -137,7 +156,7 @@ export async function handleDelivery(
  * the redelivery be processed rather than swallowed — the mistake a naive "record then handle"
  * dedupe makes.
  */
-async function apply(tx: Tx, envelope: EventEnvelope): Promise<void> {
+async function apply(deps: InboundDeps, tx: Tx, envelope: EventEnvelope): Promise<void> {
   const payload = (envelope.payload ?? {}) as Record<string, unknown>
   switch (envelope.topic) {
     case 'market.listing.sold': {
@@ -215,6 +234,37 @@ async function apply(tx: Tx, envelope: EventEnvelope): Promise<void> {
         update entitlements set revoked_at = now()
          where entitlement_id = ${entitlementId} and revoked_at is null
       `
+      return
+    }
+
+    /**
+     * Rule 6 of docs/ecosystem/03 §2, finally honoured here. `src/erasure.ts` holds the whole
+     * argument — which table is deleted, which is anonymised, and the lawful basis for every row
+     * that survives.
+     *
+     * `payload.userId`, not `envelope.key`. The registry keys this topic `by 'user_id'` and
+     * identity does put the id in the key, but the key is the ORDERING PARTITION and reading it
+     * as data is the defect `topics.ts:19-22` records: custody keyed two topics by `user_id`
+     * while the emit sites passed an address, and every event was filed against a user that does
+     * not exist. The payload field is the contract; the key is routing.
+     *
+     * A payload with no `userId` THROWS rather than returning quietly, unlike every other case
+     * in this switch. The difference is deliberate and it is the point of the whole file: a
+     * malformed sale is a lost sale and somebody will notice, while a silently dropped erasure
+     * is a compliance breach with no symptom at all. Throwing rolls back the inbox row, so the
+     * relay redelivers and the failure is visible.
+     */
+    case 'identity.user.deleted': {
+      const userId = payload['userId']
+      if (typeof userId !== 'string') {
+        throw new Error('identity.user.deleted carried no userId')
+      }
+      const counts = await eraseUser(tx, userId)
+      // COUNTS ONLY. Not the subject, not the user id, and above all not the placeholder — the
+      // placeholder beside the user id in one log line IS the mapping this erasure exists to
+      // destroy, and logs are retained on a schedule this service cannot honour a second
+      // erasure against.
+      deps.logger.info('erased a user on identity.user.deleted', { ...counts })
       return
     }
 

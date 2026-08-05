@@ -50,6 +50,7 @@ import {
   quietLogger,
   resetTessera,
   skip,
+  TEST_EVENT_SECRET,
   testMetrics,
 } from './testsupport.ts'
 import { createServer } from './server.ts'
@@ -78,6 +79,7 @@ before(async () => {
     // thing on trial, so it is the one part that could not have been faked.
     verifier: { principal: async () => WORLDS },
     sql: asDb(sql),
+    eventAcceptSecrets: [TEST_EVENT_SECRET],
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const address = server.address()

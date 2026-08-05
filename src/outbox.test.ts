@@ -277,17 +277,24 @@ test('an inbound delivery is verified over the RAW BYTES before it is parsed', {
   }
   const raw = JSON.stringify(envelope)
 
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // 403 THROUGHOUT, NOT 401. The MAC is the credential on this surface: there is no bearer
+  // token that opens it and no token endpoint to go and find one at, so 401 — "authenticate
+  // and try again" — is advice that leads nowhere. `trade/src/server.ts:726-731` is the
+  // estate's reference implementation of the same choice.
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+
   // No signature at all.
-  assert.equal((await handleDelivery(deps, raw, {})).status, 401)
+  assert.equal((await handleDelivery(deps, raw, {})).status, 403)
   // A forged one.
   assert.equal(
     (await handleDelivery(deps, raw, { [SIGNATURE_HEADER]: 't=1,v1=deadbeef' })).status,
-    401,
+    403,
   )
   // Signed with the wrong secret.
   assert.equal(
     (await handleDelivery(deps, raw, { [SIGNATURE_HEADER]: signDelivery(raw, 'c'.repeat(32)) })).status,
-    401,
+    403,
   )
 
   // ═══════════════════════════════════════════════════════════════════════════════════════
@@ -303,7 +310,7 @@ test('an inbound delivery is verified over the RAW BYTES before it is parsed', {
   assert.notEqual(reordered, raw, 'the re-serialisation fixture produces identical bytes')
   assert.equal(
     (await handleDelivery(deps, raw, { [SIGNATURE_HEADER]: signDelivery(reordered, secret) })).status,
-    401,
+    403,
   )
 
   // And the honest one.
@@ -364,7 +371,7 @@ test('a delivery signed with the OLD secret still verifies while the NEW one lea
   const stranger = await handleDelivery(deps, raw, {
     [SIGNATURE_HEADER]: signDelivery(raw, 'rotation-fixture-stranger-key-not-a-secret'),
   })
-  assert.equal(stranger.status, 401)
+  assert.equal(stranger.status, 403)
 })
 
 test('an authentic delivery naming an unregistered topic is 202, not 400', { skip }, async () => {

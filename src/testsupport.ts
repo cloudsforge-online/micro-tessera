@@ -28,6 +28,12 @@ export const ALICE_SUBJECT = `user:${ALICE}`
 export const BOB_SUBJECT = `user:${BOB}`
 export const CAROL_SUBJECT = `user:${CAROL}`
 
+/**
+ * The signing secret for `POST /v1/events` in tests. Long enough to pass `env.ts`'s 24-character
+ * bar, so a test server is configured the way a real one is rather than through a loophole.
+ */
+export const TEST_EVENT_SECRET = 'e'.repeat(32)
+
 const url = process.env['TESSERA_TEST_DATABASE_URL']
 
 export const enabled = Boolean(url && /test/i.test(url))

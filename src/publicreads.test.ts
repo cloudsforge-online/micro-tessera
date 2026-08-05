@@ -42,6 +42,7 @@ import {
   seedAccounts,
   seedWard,
   skip,
+  TEST_EVENT_SECRET,
   testMetrics,
 } from './testsupport.ts'
 import { createServer } from './server.ts'
@@ -68,6 +69,7 @@ before(async () => {
       },
     },
     sql: asDb(sql),
+    eventAcceptSecrets: [TEST_EVENT_SECRET],
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const address = server.address()
