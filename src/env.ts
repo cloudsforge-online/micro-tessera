@@ -99,6 +99,43 @@ function requiredSecret(source: Source, name: string, minLength = 24): string {
   return value
 }
 
+/**
+ * A comma-separated list of secrets, newest first.
+ *
+ * A LIST, not a value, because rotation without an overlap window means every producer must change
+ * secret in the same instant this service does, and that instant does not exist during a rolling
+ * deploy. The receiver publishes the new key, accepts both for a window, then drops the old one.
+ *
+ * Every entry is held to exactly the bar a single secret was held to — a rotation is not an excuse
+ * to smuggle a placeholder in beside a real key. The house pattern; `devplatform/src/env.ts:103`
+ * is the reference implementation and `activity` and `notify` carry the same shape.
+ */
+function parseSecretList(raw: string, name: string, minLength = 24): readonly string[] {
+  const entries = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+  if (entries.length === 0) throw new EnvError(`${name} is required — at least one secret`)
+  for (const entry of entries) {
+    if (PLACEHOLDERS.has(entry.toLowerCase())) {
+      throw new EnvError(`${name} contains a known placeholder — generate real secrets`)
+    }
+    if (entry.length < minLength) {
+      throw new EnvError(`${name} entries must each be at least ${minLength} characters`)
+    }
+  }
+  if (new Set(entries).size !== entries.length) {
+    // A duplicated secret makes the "which key verified this" answer ambiguous, and that answer is
+    // what tells an operator whether a rotation has finished and the old key may be dropped.
+    throw new EnvError(`${name} lists the same secret twice`)
+  }
+  return Object.freeze(entries)
+}
+
+function requiredSecretList(source: Source, name: string, minLength = 24): readonly string[] {
+  return parseSecretList(required(source, name), name, minLength)
+}
+
 function optional(source: Source, name: string, fallback: string): string {
   const value = source[name]?.trim()
   return value && value.length > 0 ? value : fallback
@@ -148,15 +185,32 @@ export interface Env {
   /** HMAC key for outbound event signatures, so a subscriber can prove an event came from us. */
   readonly outboxSigningSecret: string
   /**
-   * The same secret, on the way in. Deliveries this service RECEIVES — `market.listing.sold`,
-   * `community.proposal.executed`, `billing.entitlement.granted` — are signed by the producer
-   * with the estate outbox secret, and `src/inbound.ts` verifies over the raw bytes before
-   * parsing them. It is a separate variable from `OUTBOX_SIGNING_SECRET` even though the deploy
-   * sets both to the same value today, because the day the estate moves to per-producer signing
-   * secrets (which `contracts-auth`'s `admin:audit:write` entry argues for) the two stop being
-   * the same value and a service that read one variable for both would have to be found.
+   * The same secret, on the way in — and a LIST of them, newest first.
+   *
+   * Deliveries this service RECEIVES — `market.listing.sold`, `community.proposal.executed`,
+   * `billing.entitlement.granted` — are signed by the producer with the estate outbox secret, and
+   * `src/inbound.ts` verifies over the raw bytes before parsing them. It is a separate variable
+   * from `OUTBOX_SIGNING_SECRET` even though the deploy sets both to the same value today, because
+   * the day the estate moves to per-producer signing secrets (which `contracts-auth`'s
+   * `admin:audit:write` entry argues for) the two stop being the same value and a service that
+   * read one variable for both would have to be found.
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * **A LIST, AND STILL ONE VARIABLE.** The estate's outbox secret is a single key shared by 24
+   * services. Rotating it by swapping the value means a producer that moves first has every
+   * delivery refused here until this service restarts too — the deliveries do not error loudly,
+   * they PARTITION, and the failure reads as a secret mismatch rather than as a deploy ordering
+   * problem. So the receiver accepts every key that may have signed an inbound delivery, the
+   * operator adds the new one, moves the producers, and then removes the old one.
+   *
+   * A second variable was not added: the existing name becoming a list is the smaller change and
+   * it matches `notify`, whose `NOTIFY_INGEST_SIGNING_SECRET` is also singular-named and also
+   * parses to a list. `SIGNING` stays a single value — see `outboxSigningSecret` above — because
+   * signing with two keys at once would double every subscriber's verification work and leave
+   * nobody able to say which key an event was signed with.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
    */
-  readonly inboundSigningSecret: string
+  readonly inboundSigningSecrets: readonly string[]
   /**
    * Names this replica in `jobs.locked_by`. Defaults to the hostname, which is the container id
    * under compose and the pod name under Kubernetes — in both cases the thing an operator would
@@ -217,7 +271,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     identityJwksUrl: required(source, 'IDENTITY_JWKS_URL'),
     identityIssuer: required(source, 'IDENTITY_ISSUER'),
     outboxSigningSecret: requiredSecret(source, 'OUTBOX_SIGNING_SECRET'),
-    inboundSigningSecret: requiredSecret(source, 'INBOUND_SIGNING_SECRET'),
+    inboundSigningSecrets: requiredSecretList(source, 'INBOUND_SIGNING_SECRET'),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
     studioUrl: optionalOrigin(source, 'STUDIO_URL'),
     ledgerUrl: optionalOrigin(source, 'LEDGER_URL'),

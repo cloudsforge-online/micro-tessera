@@ -72,11 +72,25 @@ export async function handleDelivery(
   // Multi-secret rotation and the 5-minute freshness window both live in the contract's verifier,
   // along with the `timingSafeEqual` comparison. A local implementation is exactly what the §3.3p
   // repair found five producers had drifted into.
-  const verified = deps.secrets.some((secret) => verifyDelivery(raw, presented, secret).ok)
-  if (!verified) {
+  //
+  // The WHOLE LIST goes in as one call rather than `.some()` over one secret each: the contract
+  // already loops over the candidates internally, applying the same timing-safe comparison to
+  // every one, and it reports `keyIndex` — which key matched. A non-zero index is the operator's
+  // evidence that a producer is still on a rotated-out key, so a rotation can be declared finished
+  // on a fact rather than on a wait. `.some()` throws that answer away.
+  const verified = verifyDelivery(raw, presented, deps.secrets)
+  if (!verified.ok) {
     // The reason is not returned. "Expired" versus "forged" tells an attacker which half to fix.
     deps.logger.info('rejected an unsigned or badly signed delivery')
     return { status: 401, outcome: 'unauthenticated', detail: 'signature' }
+  }
+  if (verified.keyIndex > 0) {
+    // The index, never the key. A producer still signing with a rotated-out secret is the one
+    // thing standing between "the new key is deployed" and "the old key can be deleted", and
+    // without this line the only way to find out is to delete it and see what breaks.
+    deps.logger.warn('a delivery verified against a rotated-out signing key', {
+      keyIndex: verified.keyIndex,
+    })
   }
 
   // ONLY NOW is the body parsed.

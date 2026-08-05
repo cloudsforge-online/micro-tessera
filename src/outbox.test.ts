@@ -321,6 +321,52 @@ test('an inbound delivery is verified over the RAW BYTES before it is parsed', {
   assert.equal(again.outcome === 'duplicate', true)
 })
 
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **THE PROPERTY THE ROTATION DEPENDS ON.**
+ *
+ * `INBOUND_SIGNING_SECRET` is one key shared with every producer in the estate. If moving to a new
+ * one meant this inbox accepted only the new one, every producer still on the old key would be
+ * 401'd for the length of the rolling deploy and the deliveries would be silently partitioned. So
+ * the inbox accepts a LIST, newest first, and the old key keeps verifying until it is dropped.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+test('a delivery signed with the OLD secret still verifies while the NEW one leads the list', { skip }, async () => {
+  // Obviously fake, both of them, and long enough to clear the length rule in `env.ts`.
+  const nextSecret = 'rotation-fixture-next-key-not-a-real-secret'
+  const priorSecret = 'rotation-fixture-prior-key-not-a-real-secret'
+  const deps = { sql: asDb(sql), logger: quietLogger(), secrets: [nextSecret, priorSecret] }
+  const raw = JSON.stringify({
+    id: '0192f000-0000-7000-8000-000000000005',
+    topic: 'market.listing.sold',
+    key: 'l-2',
+    occurredAt: new Date().toISOString(),
+    producer: 'market',
+    version: '1.0',
+    actor: 'system',
+    correlationId: 'req-3',
+    payload: { listingId: 'ml-2' },
+  })
+
+  // Signed with the key being rotated OUT: still honoured, which is what keeps the window open.
+  const old = await handleDelivery(deps, raw, { [SIGNATURE_HEADER]: signDelivery(raw, priorSecret) })
+  assert.equal(old.status, 200)
+
+  // And the key being rotated IN, which nothing signs with yet, verifies as well.
+  const next = await handleDelivery(deps, raw, {
+    [SIGNATURE_HEADER]: signDelivery(raw, nextSecret),
+    [EVENT_ID_HEADER]: '0192f000-0000-7000-8000-000000000006',
+  })
+  assert.equal(next.status, 200)
+
+  // A key that is on NEITHER end of the rotation is still refused. The list widens the window, it
+  // does not widen the door.
+  const stranger = await handleDelivery(deps, raw, {
+    [SIGNATURE_HEADER]: signDelivery(raw, 'rotation-fixture-stranger-key-not-a-secret'),
+  })
+  assert.equal(stranger.status, 401)
+})
+
 test('an authentic delivery naming an unregistered topic is 202, not 400', { skip }, async () => {
   const secret = 'b'.repeat(32)
   const deps = { sql: asDb(sql), logger: quietLogger(), secrets: [secret] }
