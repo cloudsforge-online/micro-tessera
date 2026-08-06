@@ -118,7 +118,7 @@ const LISTING_COLUMNS = `id, object_id, seller_subject, price_wei::text as price
   market_seller_subject, market_platform_fee_bps, market_royalty_bps`
 
 export function toListing(row: ListingRow): Listing {
-  // `::text` then `BigInt`, never a JSON number — `market/src/escrow.ts:100-102` reads amounts the
+  // `::text` then `BigInt`, never a JSON number — `market/src/escrow.ts` reads amounts the
   // same way, for the same reason: postgres.js hands back numeric as a string, and turning it into
   // a Number on the way through would round at 2^53 while a single EMBER is 10^18 wei.
   const priceWei = parsePriceWei(row.price_wei, 'price_wei')

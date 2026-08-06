@@ -809,7 +809,7 @@ export function issuePostings(author: string, assetCode: TokenAssetCode): readon
  * attempt rather than once: the key is derived from the asset code, so a creator who lists,
  * withdraws and relists holds exactly one of their object rather than one per attempt. The ledger
  * answers the second call from its stored response and posts nothing (`market/src/ledgerclient.ts`
- * uses derived keys for the same reason, and `escrow.ts:18-21` calls it the second of three
+ * uses derived keys for the same reason, and `escrow.ts` calls it the second of three
  * independent defences).
  *
  * There is deliberately no "check the balance first". A check-then-post is a race, and the post is
