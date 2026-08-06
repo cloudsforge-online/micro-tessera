@@ -5,9 +5,9 @@
  * EVERY NAME HERE IS A `TopicName` FROM `@cloudsforge/contracts-events`, NOT A STRING.
  *
  * That is the whole point of this file. §11.2 records what happens without it: `micro-market`
- * emits ten topics with one registered (`market/src/topics.ts:65`) and `micro-community` eleven
- * with three (`community/src/events.ts:4-8`). An unregistered topic is not an error anywhere — it
- * is quarantined as `internal` by `activity/src/classify.ts:1139-1150` and appears in nobody's
+ * emits ten topics with one registered (`market/src/topics.ts`) and `micro-community` eleven
+ * with three (`community/src/events.ts`). An unregistered topic is not an error anywhere — it
+ * is quarantined as `internal` by `activity/src/classify.ts` and appears in nobody's
  * feed, which is the worst possible failure mode: the producer's tests pass, the relay's tests
  * pass, the delivery succeeds, and the event is invisible.
  *
@@ -75,7 +75,7 @@ export function keyedBy(topic: TopicName): string {
  * `community.proposal.executed` is the one §10.2 argues for at length, and the argument is worth
  * keeping next to the constant: a ward is a `micro-community` community, ward decisions ride
  * `parameter_change` proposals, and community's execution handler "does nothing for any kind
- * except `treasury_spend`" (`community/src/executions.ts:217-219`). So a design that expected
+ * except `treasury_spend`" (`community/src/executions.ts`). So a design that expected
  * community to ENACT a world change would have needed a new execution kind and a new handler in
  * somebody else's repository. Tessera subscribes and applies the parameter itself, which keeps
  * the change count in `micro-community` at zero and puts the game logic in the game.

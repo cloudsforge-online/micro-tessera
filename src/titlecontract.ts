@@ -2,7 +2,7 @@
  * The title contract: the two routes `micro-worlds` actually calls.
  *
  * §11.8: "`worlds` calls exactly two routes, despite its own client header saying four
- * (`worlds/src/titleclient.ts:7`): `GET /v1/title` returning `{slug, name, capabilities[]}`, and
+ * (`worlds/src/titleclient.ts`): `GET /v1/title` returning `{slug, name, capabilities[]}`, and
  * `POST /v1/provision` taking `{entitlementId, subject, userId, sku, scope, metadata}` and
  * returning `{urn, replayed}`, with the `entitlementId` sent as **both** the `Idempotency-Key`
  * header and a body field."
@@ -35,12 +35,12 @@ export const TITLE_SLUG = 'tessera'
  *
  * §11.8: "Tessera declares **`['private_world', 'cosmetics', 'inventory']`**. `private_world` is
  * the one that matters: the provisioning bridge calls a title only when that capability holds
- * (`worlds/src/provisioning.ts:441-451`), and provisioning a **Private Ward** is how the existing,
- * currently-unserved `world.private.small` SKU (`billing/src/migrations.ts:405`) finally gets a
+ * (`worlds/src/provisioning.ts`), and provisioning a **Private Ward** is how the existing,
+ * currently-unserved `world.private.small` SKU (`billing/src/migrations.ts`) finally gets a
  * code path."
  *
  * Typed `readonly Capability[]` and not `string[]`, which is a correction to what aetherholm does:
- * `contracts/packages/worlds/src/index.ts:110-120` records that `aetherholm/src/server.ts:107-111`
+ * `contracts/packages/worlds/src/index.ts` records that `aetherholm/src/server.ts`
  * "builds its descriptor from a bare string literal ... with nothing to check it against", and
  * that a typo there "turns a typo in a registration into a purchase that is accepted and never
  * provisioned". A misspelled capability here is a compile error.
@@ -69,7 +69,7 @@ export const TITLE_DESCRIPTOR: TitleDescriptor = Object.freeze({
  * title cannot deliver that" — rather than a silent success that bills somebody for nothing.
  *
  * `world.private.small` is the row §7.3 and §11.8 both point at: it already exists in
- * `billing/src/migrations.ts:405` (750, 30-day, title-scoped) and **no title serves it today**.
+ * `billing/src/migrations.ts` (750, 30-day, title-scoped) and **no title serves it today**.
  * This is the code path.
  */
 export const SERVED_SKUS: Readonly<Record<string, { kind: string; archetype: Archetype }>> =
@@ -85,7 +85,7 @@ export function servesSku(sku: string): boolean {
  * Provision, idempotently on `entitlementId`.
  *
  * §12's test 11: "provision replays idempotently on `entitlementId` — same `urn`, `replayed: true`
- * on the second ask, the way `worlds/src/conformance.ts:233-246` checks it."
+ * on the second ask, the way `worlds/src/conformance.ts` checks it."
  *
  * The idempotency is the PRIMARY KEY on `provisions.entitlement_id`, not a check-then-insert: two
  * bridge replicas redelivering one entitlement both run this, and exactly one insert wins. A
@@ -311,7 +311,7 @@ export function wardNameFrom(request: ProvisionRequest): string {
  * How many hex characters of the digest the slug carries. 40 is 160 bits.
  *
  * Bounded, and the bound is not aesthetic. `wardCommunitySlug` prefixes `ward-` and then
- * `.slice(0, 64)` to satisfy community's own CHECK (`communityclient.ts:109`), so a ward slug
+ * `.slice(0, 64)` to satisfy community's own CHECK (`communityclient.ts`), so a ward slug
  * longer than 59 characters is silently truncated on its way to becoming a community slug — which
  * would put this exact defect back one service downstream, where it would be somebody else's
  * unique violation. `private-` (8) + 40 = 48, and `ward-` + 48 = 53. `wards_slug_shape`, added in

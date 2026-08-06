@@ -7,14 +7,14 @@
  *
  * §8.3: "Every grant Tessera makes debits `engagement:tessera`, which is an **`equity`** account,
  * so the ledger's no-overdraft trigger refuses an unfunded grant at the database. `micro-market`
- * proves the pattern already works: `market/src/engagement.ts:22-29` names `engagementAccount`
+ * proves the pattern already works: `market/src/engagement.ts` names `engagementAccount`
  * from `contracts-money` with `equity` type precisely 'so the ledger's no-overdraft rule refuses
  * an unfunded grant'. This is what 'chain-backed by construction' actually reduces to in code:
  * **not a promise that reserves exist, but a constraint that makes spending non-existent reserves
  * unrepresentable.**"
  *
  * `ledger_assert_no_overdraft` exempts `clearing` and `suspense`; it does not exempt `equity`
- * (`ledger/src/migrations.ts:441`, `:479`). So the refusal is not something this file implements —
+ * (`ledger/src/migrations.ts`). So the refusal is not something this file implements —
  * it is something this file is careful not to route around. The account key comes from
  * `engagementAccount` in `@cloudsforge/contracts-money` rather than being spelled here, because
  * an account is `(subject, asset_code, purpose)` and a second spelling would silently split the
@@ -298,7 +298,7 @@ export interface ActivateListingInput {
  *      reading `platform_terms` — which has no subject column and a
  *      `platform_terms_is_a_singleton` CHECK, so there is exactly one rate to match.
  *   2. **Tessera never asks market for a rate.** `marketclient.ts` sends no `platformFeeBps`
- *      field, and market reads its own from `deps.platformFeeBps` (`market/src/server.ts:731`).
+ *      field, and market reads its own from `deps.platformFeeBps` (`market/src/server.ts`).
  *      The absence is asserted against a literal key list in `marketclient.test.ts`.
  *   3. **Market's answer matches Tessera's row.** This function, on every activation, for every
  *      account — and then `listings_market_agrees_on_the_rate` in migration 11, so a row that
@@ -700,7 +700,7 @@ export interface BookInput {
  *
  * §8.2's shape, not a new one: "Reserving funds is a posting from `available` to `reserved`, which
  * makes a reservation auditable, reversible and impossible to lose track of"
- * (`ledger/src/accounts.ts:9`). The reservation is taken by the route before this is called, and
+ * (`ledger/src/accounts.ts`). The reservation is taken by the route before this is called, and
  * `bookings_open_holds_money` refuses an open booking that names none — so a free hold on somebody
  * else's calendar is unrepresentable rather than discouraged.
  *
@@ -714,7 +714,7 @@ export async function bookVenue(sql: Db, input: BookInput): Promise<{ bookingId:
       // ═══════════════════════════════════════════════════════════════════════════════════════
       // THE PARTY BEING PAID, READ `for update` BEFORE THE BOOKING IS WRITTEN.
       //
-      // `notify/src/topics.ts:308` records this topic as `blockedBy: 'no-subject'` and it was
+      // `notify/src/topics.ts` records this topic as `blockedBy: 'no-subject'` and it was
       // right: the payload named the BOOKER, and the person who needs telling that their venue
       // has been booked — and whose money is on the other end of `reservation_id` — is the
       // parcel's OWNER, who appeared nowhere in it. A rule written on the old payload would have
@@ -953,7 +953,7 @@ async function closeBooking(
     // KEYS DERIVED FROM THE BOOKING, NOT FROM THE REQUEST.
     //
     // A retry — this service's, a client's, a job's — must replay rather than repeat. The ledger
-    // stores the key per route (`withIdempotency`, `ledger/src/entries.ts:1003`), and a replay
+    // stores the key per route (`withIdempotency`, `ledger/src/entries.ts`), and a replay
     // returns the SAME entry id, which is what lets `released_entry_id` be recorded truthfully by
     // whichever attempt finally commits. A per-request key would release once and then 409
     // `already_released` for ever, stranding the booking open with no way to record who freed it.

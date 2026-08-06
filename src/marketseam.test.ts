@@ -160,7 +160,7 @@ test('a checksum of any other shape is refused rather than normalised', () => {
 
 test('the market request has no fee field, and the key set is pinned against a literal', () => {
   // §7.2's fifth refusal, at the only place a per-account fee could be REQUESTED. Market reads
-  // its fee from its own environment (`market/src/server.ts:731`) and there is no body field it
+  // its fee from its own environment (`market/src/server.ts`) and there is no body field it
   // would read one from — so this asserts Tessera cannot even ask.
   //
   // Read out of the source rather than out of a call, because a stub records what the client
@@ -285,8 +285,8 @@ test('a market that names a different seller does not get to sell the object', {
   // THIS IS THE BUG THE WHOLE SEAM IS SHAPED AROUND, REPRODUCED.
   //
   // Calling market with TESSERA_SERVICE_CREDENTIAL rather than the seller's own token makes
-  // `subjectOf(principal)` answer `service:tessera` (`market/src/server.ts:1486`), and
-  // `market/src/orders.ts:388` credits sale proceeds to market's own `sellerSubject`. The creator
+  // `subjectOf(principal)` answer `service:tessera` (`market/src/server.ts`), and
+  // `market/src/orders.ts` credits sale proceeds to market's own `sellerSubject`. The creator
   // is paid nothing. Nothing throws, nothing logs, the trial balance is correct.
   // ═══════════════════════════════════════════════════════════════════════════════════════════
   const draft = await seedDraft()
@@ -517,9 +517,9 @@ test('an object is issued liability-to-its-author against a clearing counterpart
   assert.equal(debit?.account.subject, CLEARING)
   // `suspense`, NOT `treasury`. `treasury` is equity/asset/liability everywhere in this estate and
   // never `clearing`; micro-conformance's chart rejected the old spelling as implausible. This
-  // matches `trade/src/ledgerclient.ts:203-204`, which posts clearing/suspense/clearing already.
+  // matches `trade/src/ledgerclient.ts`, which posts clearing/suspense/clearing already.
   // `ledger_assert_no_overdraft` exempts both `type = 'clearing'` and `purpose = 'suspense'`
-  // (ledger/src/migrations.ts:464, :467), so the negative this account must reach is still legal.
+  // (ledger/src/migrations.ts, :467), so the negative this account must reach is still legal.
   assert.equal(debit?.account.purpose, 'suspense')
   assert.equal(credit?.direction, 'credit')
   assert.equal(credit?.account.subject, ALICE_SUBJECT)

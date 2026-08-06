@@ -6,9 +6,9 @@
  * INSTEAD.**
  *
  * §10's second "repository that needs nothing": "A ward is a community of `kind: 'public'` with
- * `governance_model: 'one_member_one_vote'` (`community/src/migrations.ts:121-123`, `:129-131`).
+ * `governance_model: 'one_member_one_vote'` (`community/src/migrations.ts`).
  * Ward decisions ride `parameter_change` proposals — one of the four kinds in the closed catalogue
- * (`community/src/proposals.ts:23-28`) — and Tessera subscribes to `community.proposal.executed`
+ * (`community/src/proposals.ts`) — and Tessera subscribes to `community.proposal.executed`
  * and applies the parameter itself."
  *
  * So this client creates a community and stores its id. It does **not** create proposals, cast
@@ -18,9 +18,9 @@
  *
  * **`one_member_one_vote` is not a default here, it is §7.1's second refusal.** "Buying votes is
  * buying power over people, and here the code already agrees": `WeightResolver` is a typed seam
- * (`community/src/votes.ts:111-114`), the sole implementation is `oneMemberOneVote` returning `1n`
- * (`:122-124`), and community's server falls back to it because `deps.weights` is optional and
- * unwired (`community/src/server.ts:861`, `:168`). Tessera asks for the model by name so that a
+ * (`community/src/votes.ts`), the sole implementation is `oneMemberOneVote` returning `1n`
+ *, and community's server falls back to it because `deps.weights` is optional and
+ * unwired (`community/src/server.ts`). Tessera asks for the model by name so that a
  * ward whose governance was token-weighted would have to be created by editing the constant below,
  * and `communityclient.test.ts` asserts that constant against a literal.
  *
@@ -35,7 +35,7 @@
  *     }                                        community/src/server.ts, `authenticateUser`
  *
  * `POST /v1/communities` then takes the owner FROM THE TOKEN, never from the body
- * (`community/src/server.ts:547`: "A caller-supplied owner is a caller who can create a community
+ * (`community/src/server.ts`: "A caller-supplied owner is a caller who can create a community
  * owned by somebody else and then be its only admin"). So Tessera cannot found a ward's community
  * with `TESSERA_SERVICE_CREDENTIAL`; it relays the founding admin's own token, exactly as the
  * market seam relays the seller's. `server.ts` requires `isAdmin` on the route for that reason —
@@ -44,7 +44,7 @@
  *
  * Note also that this route demands **no scope**, which is load-bearing: §11's caution records
  * that community's own `community:read` is **absent** from the contracts registry, and identity
- * fail-fasts at import on a grant naming an unknown scope (`identity/src/env.ts:141`). A client
+ * fail-fasts at import on a grant naming an unknown scope (`identity/src/env.ts`). A client
  * that demanded a scope here could not be granted one.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
@@ -135,7 +135,7 @@ export function createCommunityClient(options: CommunityClientOptions): Communit
             governanceModel: WARD_GOVERNANCE_MODEL,
             // No `gate`. A token-gated ward is a ward you buy your way into, which is §7.1's
             // fourth refusal — and `parseGate` is only reached when the field is present
-            // (`community/src/server.ts:550`), so its absence is the refusal.
+            // (`community/src/server.ts`), so its absence is the refusal.
           },
         })
       } catch (err) {

@@ -7,7 +7,7 @@
  * `titlecontract.test.ts` calls `provision()` and catches what it throws. That is the wrong
  * altitude for the defect this file is about, because the defect was never in what `provision`
  * threw — it was in what the CUSTOMER GOT. A `PostgresError` escaping `provision` matches none of
- * `server.ts`'s error branches (`:284-311`) and is answered:
+ * `server.ts`'s error branches and is answered:
  *
  *     500 {"error":{"code":"internal","message":"the request could not be completed"}}
  *
@@ -18,7 +18,7 @@
  *
  * ── THE ENTITLEMENT IDS ARE THE ESTATE'S OWN, NOT SYNTHETIC ─────────────────────────────────
  *
- * `worlds/src/conformance.ts:182`:
+ * `worlds/src/conformance.ts`:
  *
  *     const entitlementId = options.entitlementId ?? `conformance-${crypto.randomUUID()}`
  *
@@ -127,7 +127,7 @@ async function buy(entitlementId: string, over: Record<string, unknown> = {}): P
   return { status: response.status, body: (await response.json()) as Record<string, unknown> }
 }
 
-/** Two ids exactly as `worlds/src/conformance.ts:182` mints them, sharing a first hex digit. */
+/** Two ids exactly as `worlds/src/conformance.ts` mints them, sharing a first hex digit. */
 function twoConformanceIds(): readonly [string, string] {
   const first = randomUUID()
   let second = randomUUID()

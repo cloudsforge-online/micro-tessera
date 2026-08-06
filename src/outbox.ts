@@ -26,7 +26,7 @@
  *            defects: [ 'actor: missing',
  *                       'correlationId: missing; a cross-service investigation stops here' ] }
  *
- * That was run, not reasoned about. `EventEnvelope` (contracts/packages/events/src/index.ts:796)
+ * That was run, not reasoned about. `EventEnvelope` (contracts/packages/events/src/index.ts)
  * declares both as required strings, and `correlationId` carries a paragraph explaining that it
  * is "never optional". Eighteen repositories copied the template's relay. So this file:
  *
@@ -41,8 +41,8 @@
  *
  * §11.1. `EventVersion` is `` `${number}.${number}` `` and an integer is refused at the envelope
  * (measured: `classifyEnvelope({…, version: 1})` -> `defects: ['version: missing']`). `worlds`
- * stores an `integer` and maps it to `"n.0"` on the way out (`worlds/src/migrations.ts:65`,
- * `worlds/src/outbox.ts:52`), so a minor version is unrepresentable in its storage. Here the
+ * stores an `integer` and maps it to `"n.0"` on the way out (`worlds/src/migrations.ts`,
+ * `worlds/src/outbox.ts`), so a minor version is unrepresentable in its storage. Here the
  * stored value is the wire value, it comes from the topic's registration rather than from the
  * caller, and a CHECK constraint refuses anything that is not `major.minor`.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -145,7 +145,7 @@ export async function withOutbox<T>(sql: Db, fn: (tx: Tx, emit: Emit) => Promise
  * THE CONTRACT SIGNS, NOT THIS FILE.
  *
  * `signDelivery` produces `t=<seconds>,v1=<hmac over "seconds.body">` under `cf-signature`
- * (contracts/packages/events/src/index.ts:1272-1275). The §3.3p repair found five producers whose
+ * (contracts/packages/events/src/index.ts). The §3.3p repair found five producers whose
  * local copy signed `sha256=<hmac over body>` under a locally-spelled header, so every delivery
  * to a contract-following inbox was refused. There is no local implementation here to drift.
  */

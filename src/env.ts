@@ -41,9 +41,9 @@ import { SERVICE } from './service.ts'
  *
  *   1. the port a service BINDS in its container — this value;
  *   2. the HOST port in the estate compose file, which is DERIVED (`4100 + index in
- *      deployableRepos()`, `org/tools/cfctl.ts:864-871`) and therefore never chosen;
+ *      deployableRepos()`, `org/tools/cfctl.ts`) and therefore never chosen;
  *   3. the `devPort` in micro-ui's surface registry, documented as "not an allocation; it is a
- *      fact about a service" (`ui/packages/ui/src/surfaces.ts:455`).
+ *      fact about a service" (`ui/packages/ui/src/surfaces.ts`).
  *
  * Spaces (1) and (2) already collide three times: emberkin binds 4100, which is identity's
  * compose host port; aetherholm binds 4120, which is admin-api's; nda binds 4110, which is
@@ -73,7 +73,7 @@ export class EnvError extends Error {
  * They were a deny-list of nine exact strings plus a 24-character floor, and the only variable
  * still reaching them was `TESSERA_SERVICE_CREDENTIAL` (micro-org #222). That guard PASSED a JWT:
  * a service token is well over 24 characters and is on no list, so the estate booted a container
- * holding a token that `identity/src/tokens.ts:33` gives 600 seconds to live, and which was
+ * holding a token that `identity/src/tokens.ts` gives 600 seconds to live, and which was
  * measured on the live estate expired for **26 hours** while `/livez` answered 200 — because
  * `/livez` verifies nothing and never presents the credential to anybody.
  *
@@ -262,7 +262,7 @@ export interface Env {
    * service already refuses to boot without the issuer, the issuer IS identity's origin on both
    * estates, and every deployment therefore gains the exchange with no manifest change and no CI
    * change. `IDENTITY_URL` exists as the override for the day the issuer becomes a public URL and
-   * the in-cluster address stops matching it. `market/src/env.ts:407` reads the same two variables
+   * the in-cluster address stops matching it. `market/src/env.ts` reads the same two variables
    * the same way, and two services disagreeing about where identity lives is its own defect.
    * ════════════════════════════════════════════════════════════════════════════════════════════
    */
@@ -331,9 +331,9 @@ export interface Env {
    * ════════════════════════════════════════════════════════════════════════════════════════════
    * **THIS IS THE FIX FOR micro-org #222, AND A LONGER EXPIRY WOULD NOT HAVE BEEN.**
    *
-   * A service token lives 600 seconds (`identity/src/tokens.ts:33`) and nothing can renew it. A
+   * A service token lives 600 seconds (`identity/src/tokens.ts`) and nothing can renew it. A
    * credential is exchanged for one at `POST /service-tokens/exchange`
-   * (`identity/src/server.ts:1615`), the exchange consumes nothing, and `ServiceTokenProvider`
+   * (`identity/src/server.ts`), the exchange consumes nothing, and `ServiceTokenProvider`
    * (`@cloudsforge/auth`) re-mints on traffic at a jittered 80% of each token's life. So N replicas
    * boot from one credential and a restart days later still works. The 600 seconds is deliberately
    * unchanged — rotation IS expiry, and lengthening the TTL leaves the same defect arriving later
@@ -349,7 +349,7 @@ export interface Env {
    * A pre-minted service token, read once at boot. **A MIGRATION AID WITH A STATED END.**
    *
    * ════════════════════════════════════════════════════════════════════════════════════════════
-   * This variable IS micro-org #222. `index.ts:134` and `:172` handed its value straight to the
+   * This variable IS micro-org #222. `index.ts` and handed its value straight to the
    * studio and ledger clients as their bearer — "until this service is granted a credential in the
    * deploy, the credential IS the token" — and on the live estate it held a JWT that had been
    * expired for **26 hours** on a container reporting healthy, because `/livez` never presents it

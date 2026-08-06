@@ -373,7 +373,7 @@ test('a contest before the window is refused on the DATABASE clock, not the call
   // ═══════════════════════════════════════════════════════════════════════════════════════════
   // THE FALLOW EVENT NAMES THE OWNER LOSING GROUND, NOT THE CHALLENGER TAKING IT.
   //
-  // `notify/src/topics.ts:299` records this topic `blockedBy: 'no-subject'`, and it was right:
+  // `notify/src/topics.ts` records this topic `blockedBy: 'no-subject'`, and it was right:
   // the payload carried `challengerSubject` and nothing else. The person who needs telling — and
   // who has thirty days to do something about it — is the OWNER, who was absent entirely.
   //

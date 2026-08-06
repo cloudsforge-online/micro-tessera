@@ -251,7 +251,7 @@ test('every SKU in §7.3 resolves to a deliverable entitlement kind', () => {
     ['tessera.deed.slot', 'deed_slots'],
     ['tessera.appearance.gouache', 'appearance'],
     ['tessera.name.reserve', 'name_reservation'],
-    // Already exists in billing/src/migrations.ts:405 and no title serves it today.
+    // Already exists in billing/src/migrations.ts and no title serves it today.
     ['world.private.small', 'private_ward'],
     ['tessera.venue.calendar', 'venue_calendar'],
   ]
@@ -295,7 +295,7 @@ test('the engagement account is engagement:tessera / EMBER / treasury, typed equ
  * `holder` used to canonicalise a `user:` subject and return anything else UNCHANGED, so
  * `holder('alice', …)` produced an account keyed on the subject `alice` — not a user account, not
  * any kind `AccountSubject` names, and reconcilable with nothing. Tessera's `accounts` table
- * admits no such subject (`accounts_subject_is_a_user`, migrations.ts:203) and every subject
+ * admits no such subject (`accounts_subject_is_a_user`, migrations.ts) and every subject
  * column is a foreign key into it, so this path was already unreachable from the database; the
  * throw is that guarantee said out loud rather than assumed.
  */
@@ -334,10 +334,10 @@ test('a grant debits the engagement account and balances, and the postings are t
  * The one debit it allowed was `releasePostings`, which had zero callers. Reading micro-market's
  * source rather than the design prose showed why it should never gain one:
  *
- *   * market credits the SELLER's `payout_due` at settlement (`market/src/orders.ts:339`, `:388`),
+ *   * market credits the SELLER's `payout_due` at settlement (`market/src/orders.ts`),
  *     and
  *   * market RELEASES it to `available` when the dispute window has run — `releaseProceeds`
- *     (`orders.ts:696`) driven by a leased job (`market/src/jobs.ts:322`, `PAYOUT_KIND`).
+ *     (`orders.ts`) driven by a leased job (`market/src/jobs.ts`, `PAYOUT_KIND`).
  *
  * So a Tessera release would be a second service moving one payout. The ledger would refuse it —
  * a user's `payout_due` is `liability`, which `ledger_assert_no_overdraft` does not exempt — but
@@ -499,7 +499,7 @@ test('a venue booking needs a venue, a posted rate, an escrow hold, and a free s
   // ═══════════════════════════════════════════════════════════════════════════════════════════
   // THE PAYLOAD NAMES THE OWNER, AND THAT IS THE ONLY REASON A NOTIFY RULE CAN EXIST.
   //
-  // `notify/src/topics.ts:308` records this topic `blockedBy: 'no-subject'`. The payload named
+  // `notify/src/topics.ts` records this topic `blockedBy: 'no-subject'`. The payload named
   // the BOOKER, so the party whose venue was taken and whose money is on the other end of
   // `reservationId` was absent — a rule on it answers `no_recipient` for ever, or tells Bob about
   // Bob's own booking.
@@ -540,17 +540,17 @@ test('a venue booking needs a venue, a posted rate, an escrow hold, and a free s
  * every one of them can refuse this service:
  *
  *   * **Two accounts, not two columns.** A reservation is a posting pair `available → reserved`
- *     (`ledger/src/entries.ts:930`, `contracts-money`'s `reservePostings`), so "how much is
+ *     (`ledger/src/entries.ts`, `contracts-money`'s `reservePostings`), so "how much is
  *     reserved" is a balance here exactly as it is there — nothing in this double tracks holds in
  *     a set on the side, which is the shape that would make the zero at the end meaningless.
  *   * **No overdraft.** A user's accounts are `liability` and `ledger_assert_no_overdraft` does
- *     not exempt those (`ledger/src/migrations.ts:441`, `:479`), so a balance that would go
+ *     not exempt those (`ledger/src/migrations.ts`), so a balance that would go
  *     negative throws rather than going negative.
- *   * **Release is full, once, and reversing.** `ledger/src/entries.ts:998` — the second release
+ *   * **Release is full, once, and reversing.** `ledger/src/entries.ts` — the second release
  *     of one reservation is `AlreadyReleasedError`, which is what makes a double-release a red
  *     test rather than free money.
  *   * **Idempotency is by key, and a replay returns the SAME entry.** `withIdempotency`
- *     (`ledger/src/entries.ts:1003`). `closeBooking` derives its keys from the booking id
+ *     (`ledger/src/entries.ts`). `closeBooking` derives its keys from the booking id
  *     precisely so a retry replays, and this is where that is checked.
  */
 function ledgerDouble() {

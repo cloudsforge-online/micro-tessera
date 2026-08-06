@@ -8,7 +8,7 @@
  *
  * `server.ts` argues at length why the Mosaic is public; the short form is that 23-tessera.md §5
  * opens its loop with "arrive at the Commons — a browser tab; no download, no plugin, **no account
- * wall**", that `worlds/src/server.ts:507` already serves the title registry unauthenticated under
+ * wall**", that `worlds/src/server.ts` already serves the title registry unauthenticated under
  * "a launcher listing games cannot require a token to do it", and that the 401 was never a security
  * boundary in any case: a ward row carries no user-scoped field, and any account could already read
  * it while an account is free and self-serve. It made a public map cost a signup, and nothing else.
@@ -127,7 +127,7 @@ test('the buildings are public too — a world with invisible buildings feels em
   assert.ok(Array.isArray(answer.body['parcels']))
 
   // The whole anonymous path, and it is only two calls: `listWards` then `listWardParcels`
-  // (`tessera-web/src/pages/world.tsx:47` and `:86`). Asserted so that "opening this bounded the
+  // (`tessera-web/src/pages/world.tsx` and). Asserted so that "opening this bounded the
   // change rather than starting a slide" is a fact a later reader can check rather than a claim.
   assert.equal((await anonymous('/v1/wards')).status, 200)
 })

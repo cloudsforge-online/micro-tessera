@@ -78,8 +78,8 @@ test('the canvas is 512 and is a multiple of 16, which is what FLUX floors to', 
  *
  * `promptFor()` built the projection, the light and the ground here, and this test read them back
  * — a function agreeing with itself. Studio takes NO prompt on its generate route
- * (`studio/src/server.ts:418-430`): it builds one from the kind's own paragraph and the brand
- * kit's `stylePrompt` (`studio/src/prompt.ts:127-157`). So the string this test was grading was
+ * (`studio/src/server.ts`): it builds one from the kind's own paragraph and the brand
+ * kit's `stylePrompt` (`studio/src/prompt.ts`). So the string this test was grading was
  * never sent anywhere, and could not have been.
  *
  * What is left here is the list and its own shape. Whether the BRIEF actually survives is a claim
@@ -103,7 +103,7 @@ test('the brief this title requires of studio is a list, not a second copy of th
 })
 
 test('a firings brand kit is named for the object, so a retry finds the one it already made', () => {
-  // `brand_kits_owner_name_uniq` (studio/src/migrations.ts:125) makes a repeat a 409, and studio
+  // `brand_kits_owner_name_uniq` (studio/src/migrations.ts) makes a repeat a 409, and studio
   // serves no route that finds a kit by name — so the name must be derivable and stable.
   assert.equal(kitNameFor('abc'), 'tessera-object-abc')
   assert.equal(kitNameFor('abc'), kitNameFor('abc'))
@@ -112,7 +112,7 @@ test('a firings brand kit is named for the object, so a retry finds the one it a
 })
 
 test('the firing lease key is the shape studio uses, so one players firings serialise on both sides', () => {
-  // studio/src/generation.ts:234 — `owner:<subject>`. §11.4 says the match is deliberate.
+  // studio/src/generation.ts — `owner:<subject>`. §11.4 says the match is deliberate.
   assert.equal(firingLeaseKey(ALICE_SUBJECT), `owner:${ALICE_SUBJECT}`)
   assert.match(firingLeaseKey(ALICE_SUBJECT), /^owner:/)
 })
@@ -466,7 +466,7 @@ test('an empty prompt is refused here, so studios 400 is unreachable', { skip },
  * That is a fact about the chain and cannot be fixed here.
  *
  * What COULD be fixed here is that the payload was never checked against the consumer already
- * waiting on it. `micro-notify`'s rule (`notify/src/catalogue.ts:1148-1166`) reads exactly four
+ * waiting on it. `micro-notify`'s rule (`notify/src/catalogue.ts`) reads exactly four
  * things off this event, and `userOfSubject` on the first of them decides whether anybody is told
  * at all — so a payload that dropped `authorSubject` would resolve nobody for ever, which is the
  * `no-subject` failure this repository just fixed on two OTHER topics. These tests grade the four
@@ -502,7 +502,7 @@ test('an anchor emits the four fields notify reads, keyed by the object', { skip
   assert.equal(payload['authorSubject'], ALICE_SUBJECT)
   assert.equal(payload['objectId'], id)
   // Rendered into the template's `{{transactionHash}}` and `{{blockNumber}}`
-  // (`notify/src/templates.ts:400-404`). A blank block number makes the sentence unverifiable.
+  // (`notify/src/templates.ts`). A blank block number makes the sentence unverifiable.
   assert.equal(payload['transactionHash'], `0x${'ab'.repeat(32)}`)
   assert.equal(String(payload['blockNumber']), '4242')
 })

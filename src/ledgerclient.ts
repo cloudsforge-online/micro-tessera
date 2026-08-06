@@ -5,21 +5,21 @@
  * THE ACCOUNT KEY IS THE CONTRACT'S, AND THE WIRE SHAPE IS THE ONE OTHER SERVICES ALREADY SEND.
  *
  * A ledger account is `(subject, asset_code, purpose)` and nothing else
- * (`ledger/src/accounts.ts:4`). `ledger/src/accounts.ts` THROWS on a `type` mismatch against an
+ * (`ledger/src/accounts.ts`). `ledger/src/accounts.ts` THROWS on a `type` mismatch against an
  * account that already exists, and whichever service posts second has **every** entry refused. So
  * a second spelling of `engagement:tessera`, or the same subject with `type: 'expense'` instead of
  * `'equity'`, is not a cosmetic difference; it is this service's entire economy failing at a
- * moment nobody chose. `contracts/packages/money/src/index.ts:205` records that `micro-foresight`
+ * moment nobody chose. `contracts/packages/money/src/index.ts` records that `micro-foresight`
  * "shipped exactly that defect with `foresight.settlement_fee` and posted nothing for months".
  *
  * So: every identity comes from `@cloudsforge/contracts-money` — `engagementAccount`,
  * `userSubject`, the `AccountPurpose` and `AccountType` unions — and the wire body is
- * field-for-field what `market/src/ledgerclient.ts:381-408` sends, including
+ * field-for-field what `market/src/ledgerclient.ts` sends, including
  * `originatingService`, `actor`, `correlationId`, the inline `account` block, and amounts as
  * decimal STRINGS. Nothing here spells an account by hand.
  *
  * **AND `equity` IS THE SAFETY PROPERTY.** `ledger_assert_no_overdraft` exempts `clearing` and
- * `suspense` and does not exempt `equity` (`ledger/src/migrations.ts:441`, `:479`), so a grant
+ * `suspense` and does not exempt `equity` (`ledger/src/migrations.ts`), so a grant
  * against an unfunded `engagement:tessera` is refused BY THE DATABASE. §8.3: "not a promise that
  * reserves exist, but a constraint that makes spending non-existent reserves unrepresentable."
  * This file's job is to not route around that: there is no `overdraftAllowed` path, no `suspense`
@@ -49,7 +49,7 @@ import { SERVICE } from './service.ts'
 
 /**
  * The scopes this module's credential must carry, declared here so the deploy can mint exactly
- * these — the convention `community/src/index.ts:130` states and twenty repositories follow, and
+ * these — the convention `community/src/index.ts` states and twenty repositories follow, and
  * the one `deploy/scripts/derive-grants.mjs` actually reads.
  *
  * ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -58,8 +58,8 @@ import { SERVICE } from './service.ts'
  * `deploy/compose/estate/grant-gaps.json` granted this file `ledger:post` alone and said why:
  * "Derived by reading the single call site: POST /entries. **It reaches no other ledger route.**"
  * That was true, and it stopped being true the moment `reserve` and `release` below were written —
- * both are gated on `RESERVE_SCOPE = 'ledger:reserve'` (`ledger/src/server.ts:80`, demanded at
- * `:449` and `:488`). The grant was never external and never anyone else's to open: it is
+ * both are gated on `RESERVE_SCOPE = 'ledger:reserve'` (`ledger/src/server.ts`, demanded at
+ * and). The grant was never external and never anyone else's to open: it is
  * computed from this repository's own source, and this constant is that source.
  *
  * That same gaps entry ends "This entry deletes itself the day micro-tessera exports
@@ -191,7 +191,7 @@ export interface LedgerClient {
   /**
    * Move a booker's fee from `available` to `reserved` and hand back the hold's id.
    *
-   * **The reservation IS the entry** (`ledger/src/server.ts:519`): there is no separate
+   * **The reservation IS the entry** (`ledger/src/server.ts`): there is no separate
    * reservations table to fall out of step with the journal, so the id stored in
    * `bookings.reservation_id` is a journal entry id and "does this hold exist" is answered by the
    * rows that prove the money moved.
@@ -199,7 +199,7 @@ export interface LedgerClient {
   reserve(request: ReserveRequest): Promise<{ reservationId: string; replayed: boolean }>
   /**
    * Return a hold to `available`. **Full release only** — the ledger declines to model a partial
-   * one (`ledger/src/entries.ts:985`) and a booking never needs one, because a booking's price is
+   * one (`ledger/src/entries.ts`) and a booking never needs one, because a booking's price is
    * a single number the schema pins to the owner's posted rate.
    */
   release(reservationId: string, request: ReleaseRequest): Promise<{ id: string; replayed: boolean }>
@@ -227,11 +227,11 @@ export interface LedgerClientOptions {
  *
  * `assertBalanced` is the contract's own check and it takes the RESOLVED `Posting` shape
  * (`accountId`-keyed), while the wire sends the inline `account` block — the two forms
- * `contracts/packages/money/src/index.ts:210-216` explains exist for different jobs. `accountKey`
+ * `contracts/packages/money/src/index.ts` explains exist for different jobs. `accountKey`
  * builds the resolved id from the identity, so this checks exactly the accounts the wire names.
  *
  * The ledger has a deferred trigger that enforces the same invariant per `asset_code`
- * (`ledger/src/migrations.ts:302-313`), so this is a second check. Deliberately: an unbalanced
+ * (`ledger/src/migrations.ts`), so this is a second check. Deliberately: an unbalanced
  * entry that fails at the ledger is a round trip and a log line in somebody else's service, while
  * one that fails here names the caller that built it.
  */
@@ -265,7 +265,7 @@ export function createLedgerClient(options: LedgerClientOptions): LedgerClient {
             // The key is in the body AND on the request, and both matter. In the body it is what
             // the ledger stores and dedupes on; on the request it is what makes the POST retriable
             // at all, because `HttpClient` attempts a non-idempotent method exactly once without
-            // one. `market/src/ledgerclient.ts:383-386` says the same, and the two must agree.
+            // one. `market/src/ledgerclient.ts` says the same, and the two must agree.
             idempotencyKey: request.idempotencyKey,
             requestId: request.correlationId,
             headers: { authorization: `Bearer ${await options.token()}` },
@@ -411,7 +411,7 @@ export function createLedgerClient(options: LedgerClientOptions): LedgerClient {
  * Turn a ledger failure into something this service can act on.
  *
  * The overdraft trigger raises `check_violation` with a message naming the account and the amount
- * it would go to (`ledger/src/migrations.ts:474-478`). Matching on the SENTENCE rather than on a
+ * it would go to (`ledger/src/migrations.ts`). Matching on the SENTENCE rather than on a
  * status code, because a 409 from the ledger could be a dozen things and only this one means "the
  * world cannot pay what it does not hold" — which is the one this service must surface differently
  * and must never retry.
@@ -429,7 +429,7 @@ function translate(err: unknown): Error {
         'look (23-tessera.md §8.3).',
     )
   }
-  // The ledger's own sentence, `ledger/src/entries.ts:1017`. Matched rather than inferred from the
+  // The ledger's own sentence, `ledger/src/entries.ts`. Matched rather than inferred from the
   // 409, because "already released" is the ONE release failure that is not a reason to retry: the
   // money has already left `reserved`, and a caller told to try again would loop on a fact.
   if (message.includes('was already released by entry')) {
@@ -451,7 +451,7 @@ function translate(err: unknown): Error {
  * MONEY IT IS.
  *
  * That function moved a creator's `payout_due` → `available` for a MARKET SALE, which
- * `market/src/orders.ts:696` already does — two services releasing one payout. A venue booking
+ * `market/src/orders.ts` already does — two services releasing one payout. A venue booking
  * never reaches micro-market: no listing, no order, no settlement, nobody else to double it. §8.4
  * lists it in its own right — "Earned: object sales, royalties on every resale, **venue
  * bookings**, and commissions" — and Tessera is the only service that holds a calendar.
@@ -481,7 +481,7 @@ export function bookingFeePostings(
  *
  * **Every subject this service can hold is a user subject, and the DATABASE is what says so**:
  * `accounts.subject` carries `constraint accounts_subject_is_a_user check (subject like 'user:%')`
- * (`migrations.ts:203`), and every subject-bearing column — `author_subject`, `owner_subject`,
+ * (`migrations.ts`), and every subject-bearing column — `author_subject`, `owner_subject`,
  * `beneficiary`, `seller_subject`, `booked_by` — is a foreign key into it. So a subject that is
  * not a user's cannot have reached this file from any table Tessera owns.
  *
@@ -496,7 +496,7 @@ function userIdOf(subject: string): string {
     throw new LedgerError(
       'invalid_subject',
       `${subject} is not a user subject — Tessera's accounts table admits none other ` +
-        '(migrations.ts:203, accounts_subject_is_a_user)',
+        '(migrations.ts, accounts_subject_is_a_user)',
       500,
     )
   }
@@ -614,7 +614,7 @@ export async function grantFromEngagement(
  *
  * §8.2: "The available/reserved split is two accounts, not two columns. Reserving funds is a
  * posting from `available` to `reserved`, which makes a reservation auditable, reversible and
- * impossible to lose track of" (`ledger/src/accounts.ts:9`).
+ * impossible to lose track of" (`ledger/src/accounts.ts`).
  */
 export function reservePostings(subject: string, amountWei: bigint): readonly PostingRequest[] {
   return [
@@ -634,11 +634,11 @@ export function reservePostings(subject: string, amountWei: bigint): readonly Po
  * Read out of market's source rather than assumed:
  *
  *   * **The credit.** Settlement is one balanced entry whose proceeds leg lands in the SELLER's
- *     `payout_due` — `market/src/orders.ts:339` (`proceedsPurpose: holdProceeds ? 'payout_due' :
- *     'available'`) on `subject: listing.sellerSubject` (`:388`).
- *   * **The release.** `releaseProceeds` (`market/src/orders.ts:696`) moves `payout_due` →
+ *     `payout_due` — `market/src/orders.ts` (`proceedsPurpose: holdProceeds ? 'payout_due' :
+ *     'available'`) on `subject: listing.sellerSubject`.
+ *   * **The release.** `releaseProceeds` (`market/src/orders.ts`) moves `payout_due` →
  *     `available` once `payout_due_at` has passed, driven by a LEASED JOB — `PAYOUT_KIND`,
- *     `market/src/jobs.ts:322`, fed by `duePayouts` (`orders.ts:789`).
+ *     `market/src/jobs.ts`, fed by `duePayouts` (`orders.ts`).
  *
  * So a creator IS paid, end to end, by the service that holds the sale. What was actually missing
  * was never a payout: it was that **no Tessera listing had ever reached micro-market**, so no sale
@@ -687,7 +687,7 @@ export interface Wallet {
  * The distinction the client needs is preserved by the ROUTE rather than by this value: if the
  * ledger cannot be reached, `GET /v1/me/balances` answers 503 and no number at all. "We have none"
  * and "we could not fetch them" must never look the same to a client — the same rule
- * `market/src/server.ts:858` states for its risk indicators.
+ * `market/src/server.ts` states for its risk indicators.
  *
  * `LedgerClient.balances` already refuses an amount that is not `/^-?\d{1,78}$/` before calling
  * `BigInt`, so a malformed figure is dropped rather than becoming `0n` through the back door.
@@ -714,7 +714,7 @@ export async function walletOf(ledger: LedgerClient, subject: string): Promise<W
  * CONSTRAINT.**
  *
  * §8.5's last line: "The one constraint that binds is `listings_active_is_escrowed`
- * (`market/src/migrations.ts:289-293`): an active listing must hold an escrow, so a Tessera object
+ * (`market/src/migrations.ts`): an active listing must hold an escrow, so a Tessera object
  * must be ledger-reservable under an `item_asset_code` before it can go live."
  *
  * Market's activation does exactly that — `market/src/listings.ts` `activateListing` calls
@@ -744,7 +744,7 @@ export async function walletOf(ledger: LedgerClient, subject: string): Promise<W
  * **No service in the estate had written a `TOKEN:` balance before this one**, which was verified
  * rather than assumed, and is why every field is cited: there is no prior spelling of the ASSET to
  * match, so this is the one that the next service will have to match. The `(subject, purpose,
- * type)` triple, by contrast, is NOT novel and must not be — `trade/src/ledgerclient.ts:203-204`
+ * type)` triple, by contrast, is NOT novel and must not be — `trade/src/ledgerclient.ts`
  * writes `clearing`/`suspense`/`clearing` already, and this matches it deliberately.
  * `ledger/src/accounts.ts` throws on a `type` mismatch against an existing account and whichever
  * service posts second has EVERY entry refused.
@@ -771,12 +771,12 @@ export function objectHolder(subject: string, assetCode: TokenAssetCode): Accoun
  * otherwise.** `treasury` is `equity` for the platform and the engagement programme, `asset` for
  * custody and `liability` for a community — it is never `clearing`, in any service in the estate.
  * `clearing`/`suspense` is: `contracts` calls it "value in transit, owed onwards", and
- * `trade/src/ledgerclient.ts:203-204` already posts exactly this shape, so this now MATCHES a
+ * `trade/src/ledgerclient.ts` already posts exactly this shape, so this now MATCHES a
  * spelling that exists rather than inventing a third.
  *
  * The safety property is unchanged and is now doubly held: `ledger_assert_no_overdraft` returns
  * early for `acct.type = 'clearing'` AND for `acct.purpose = 'suspense'`
- * (`ledger/src/migrations.ts:464`, `:467`), and the negative balance here is the count of the
+ * (`ledger/src/migrations.ts`), and the negative balance here is the count of the
  * object in circulation.
  */
 export function objectIssuer(assetCode: TokenAssetCode): AccountRef {

@@ -5,10 +5,10 @@
  * ## THE KILN THAT WAS COLD AND SAID IT WAS WARM (micro-org #222)
  *
  * `TESSERA_SERVICE_CREDENTIAL` held a token that lives **600 seconds**
- * (`identity/src/tokens.ts:33`, `SERVICE_TTL_SECONDS = 10 * 60`). The composition root read it once,
+ * (`identity/src/tokens.ts`, `SERVICE_TTL_SECONDS = 10 * 60`). The composition root read it once,
  * at import, and handed the same string to both credentialed clients:
  *
- *     token: async () => env.serviceCredential ?? ''      index.ts:134 (studio) and :172 (ledger)
+ *     token: async () => env.serviceCredential ?? ''      index.ts (studio) and :172 (ledger)
  *
  * The file even said so out loud — "until this service is granted a credential in the deploy, the
  * credential IS the token" — which is an accurate description of a container that authenticates
@@ -28,7 +28,7 @@
  * Because rotation IS expiry. A 24-hour service token is the same defect arriving a day later and
  * hurting more, and it makes a leaked token useful for a day. `micro-identity` fixed the server
  * half: a container holds a long-lived, revocable **credential** (`cfsc_…`) and exchanges it at
- * `POST /service-tokens/exchange` (`identity/src/server.ts:1615`) for an ordinary 600-second token.
+ * `POST /service-tokens/exchange` (`identity/src/server.ts`) for an ordinary 600-second token.
  * The exchange consumes nothing, so N replicas boot from one credential and a restart days later
  * still works. This file is the other half.
  *
@@ -67,10 +67,10 @@
  *
  * ## THE TWO PEERS THAT HOLD NO CREDENTIAL, AND MUST NOT BE "FIXED"
  *
- *   * **market** takes the seller from the bearer (`market/src/server.ts:681`, `subjectOf` at
- *     `:1486`) and has no on-behalf-of lane. A listing created with this service's token would have
+ *   * **market** takes the seller from the bearer (`market/src/server.ts`, `subjectOf` at
+ *) and has no on-behalf-of lane. A listing created with this service's token would have
  *     `service:tessera` as its seller, and market credits sale proceeds to its own `sellerSubject`
- *     (`market/src/orders.ts:388`) — **the creator would be paid nothing, silently, with every test
+ *     (`market/src/orders.ts`) — **the creator would be paid nothing, silently, with every test
  *     passing**. So both market calls relay the SELLER's own bearer, per request. See
  *     `marketclient.ts`'s header, and migration 11, which CHECKs market's answer against Tessera's
  *     so the mistake cannot even be stored.

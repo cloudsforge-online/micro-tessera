@@ -5,7 +5,7 @@
  * **THE SIGNATURE IS VERIFIED OVER THE RAW BYTES, BEFORE THEY ARE PARSED. THE ORDER IS THE
  * SECURITY PROPERTY.**
  *
- * `activity/src/ingest.ts:83-95` does this and its header at `:76-82` explains why re-serialising
+ * `activity/src/ingest.ts` does this and its header explains why re-serialising
  * before verifying is forbidden: `JSON.parse` then `JSON.stringify` is not the identity function —
  * key order, number formatting and unicode escapes all change — so a MAC recomputed over the
  * re-serialised body is a MAC over different bytes, and every honest delivery is refused while the
@@ -74,7 +74,7 @@ export async function handleDelivery(
     // nowhere: there is no bearer token that opens this route, no WWW-Authenticate challenge to
     // answer, and no token endpoint to go and find one at. **The MAC is the credential.** A
     // caller without the estate signing secret is not unauthenticated, it is refused, and
-    // `trade/src/server.ts:726-731` is the estate's reference implementation of exactly this
+    // `trade/src/server.ts` is the estate's reference implementation of exactly this
     // choice: "Not 401: this is not a bearer-token surface, and answering 401 would invite a
     // caller to go and find a token."
     //
@@ -171,7 +171,7 @@ async function apply(deps: InboundDeps, tx: Tx, envelope: EventEnvelope): Promis
      * §10.2's argument, implemented.
      *
      * "community's execution handler does nothing for any kind except `treasury_spend`
-     * (`community/src/executions.ts:217-219`), so a design that expected community to *enact* a
+     * (`community/src/executions.ts`), so a design that expected community to *enact* a
      * world change would have needed a new execution kind and a new handler in somebody else's
      * repo. Putting the effect in Tessera keeps the change count at zero and puts the game logic
      * in the game."
@@ -244,7 +244,7 @@ async function apply(deps: InboundDeps, tx: Tx, envelope: EventEnvelope): Promis
      *
      * `payload.userId`, not `envelope.key`. The registry keys this topic `by 'user_id'` and
      * identity does put the id in the key, but the key is the ORDERING PARTITION and reading it
-     * as data is the defect `topics.ts:19-22` records: custody keyed two topics by `user_id`
+     * as data is the defect `topics.ts` records: custody keyed two topics by `user_id`
      * while the emit sites passed an address, and every event was filed against a user that does
      * not exist. The payload field is the contract; the key is routing.
      *

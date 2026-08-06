@@ -267,7 +267,7 @@ async function seedAUserWithEverything(): Promise<{ readonly wardId: string }> {
     values ('ent-erasure-2', ${ALICE_SUBJECT}, ${ALICE}::uuid, 'world.private.small', 'ward',
             'cf:tessera:ward:0192fa00-0000-7000-8000-0000000000ff')
   `
-  // An emitted event naming her, of the shape `world.ts:437-450` writes: the subject in `actor`
+  // An emitted event naming her, of the shape `world.ts` writes: the subject in `actor`
   // AND again inside the payload, beside the parcel id that will outlive her.
   await sql`
     insert into outbox (topic, key, producer, version, actor, correlation_id, payload)

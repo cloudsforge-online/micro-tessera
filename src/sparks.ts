@@ -6,11 +6,11 @@
  * BECOME ONE.** — 23-tessera.md §8.1, which calls that the most important sentence in the section.
  *
  * The reason is the estate's oldest defect. The ledger's balancing invariant is enforced PER
- * `asset_code` by trigger (`ledger/src/migrations.ts:302-313`), so if Sparks were its own asset
+ * `asset_code` by trigger (`ledger/src/migrations.ts`), so if Sparks were its own asset
  * code the trigger would happily let Sparks and EMBER drift apart, and reconciling them would
  * require a rate — and a rate between an internal unit and a chain asset is precisely the
  * mechanism of `convertCoinToEmber`, which "credit[s] custodial EMBER with no on-chain movement
- * behind it" (`ledger/src/migrations.ts:540`), described at `wallet/src/money.ts:41-43` as "a
+ * behind it" (`ledger/src/migrations.ts`), described at `wallet/src/money.ts` as "a
  * liability minted against nothing, with no counter-account and therefore nothing that could ever
  * notice".
  *
@@ -60,7 +60,7 @@ export class MoneyError extends Error {
  *
  * §11.5: "`BigInt('')` is `0n`, which turns a missing amount into a free purchase. `micro-market`
  * makes it **unreachable rather than handled**: `parseAmount` requires `/^\d{1,78}$/` **before**
- * calling `BigInt` (`market/src/money.ts:222-227`). Tessera imports that helper rather than
+ * calling `BigInt` (`market/src/money.ts`). Tessera imports that helper rather than
  * writing a second one."
  *
  * **It could not be imported, and that is worth recording rather than quietly working around.**
@@ -129,7 +129,7 @@ export const BPS_SCALE = 10_000n
 /**
  * `bps` of `amount`, **rounded down**.
  *
- * Down, deliberately, and in the platform's disfavour — `market/src/money.ts:41-53`. The seller's
+ * Down, deliberately, and in the platform's disfavour — `market/src/money.ts`. The seller's
  * proceeds are the REMAINDER, so every wei that rounding does not assign to the fee or a royalty
  * goes to the seller. Rounding the other way would leak value out of the partition by one wei per
  * sale, in the platform's favour, invisibly.
@@ -168,12 +168,12 @@ export interface SaleSplit {
  * What the seller actually receives, computed the way micro-market will compute it at settlement.
  *
  * Tessera does not settle — §8.5's settlement is one balanced ledger entry built by
- * `market/src/orders.ts:324-338`. This exists so the seller can be SHOWN the number before they
+ * `market/src/orders.ts`. This exists so the seller can be SHOWN the number before they
  * list, and it must agree with market to the wei or the shown number is a lie. Hence the property
  * test rather than three examples.
  *
  * `proceeds = price − fee − royalty`, the remainder, so `fee + royalty + proceeds === price` holds
- * by construction rather than by arithmetic luck (`market/src/money.ts:160`).
+ * by construction rather than by arithmetic luck (`market/src/money.ts`).
  */
 export function splitSale(terms: SaleTerms): SaleSplit {
   if (terms.priceWei < 0n) throw new MoneyError('priceWei must not be negative')
@@ -191,8 +191,8 @@ export function splitSale(terms: SaleTerms): SaleSplit {
 /**
  * The partition, asserted on every call.
  *
- * `market/src/money.ts:195-212` does the same, and Postgres asserts it a third time on the order
- * row (`orders_partition`, `market/src/migrations.ts:516`). Three assertions of one identity is
+ * `market/src/money.ts` does the same, and Postgres asserts it a third time on the order
+ * row (`orders_partition`, `market/src/migrations.ts`). Three assertions of one identity is
  * not redundancy: each is reachable by a caller the other two are not.
  */
 export function assertPartition(split: SaleSplit): void {
@@ -210,13 +210,13 @@ export function assertPartition(split: SaleSplit): void {
 /**
  * Split one amount across weighted recipients by largest remainder, with an index tie-break.
  *
- * `market/src/money.ts:68-113`, and the tie-break is why it is copied rather than approximated:
+ * `market/src/money.ts`, and the tie-break is why it is copied rather than approximated:
  * two replicas computing one royalty split must agree exactly, and "largest remainder" alone is
  * ambiguous when two remainders are equal. §8.5 names the case this matters for here — "a
  * derivative object splits its royalty between the original author and the remixer, so a remix
  * culture is expressible without either party trusting the other".
  *
- * A zero-weight recipient receives nothing, ever, including dust (`market/src/money.ts:102`).
+ * A zero-weight recipient receives nothing, ever, including dust (`market/src/money.ts`).
  */
 export function allocate(total: bigint, weights: readonly number[]): bigint[] {
   if (total < 0n) throw new MoneyError('total must not be negative')

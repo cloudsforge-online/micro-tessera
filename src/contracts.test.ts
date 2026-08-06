@@ -132,7 +132,7 @@ test('the registry holds no tessera scope this service does not demand', () => {
 })
 
 test('the three scope constants are LITERALS the estate derivation can resolve', () => {
-  // aetherholm's lesson (aetherholm/src/server.ts:121): `scopeFor(SLUG, 'read')` is rejected by
+  // aetherholm's lesson (aetherholm/src/server.ts): `scopeFor(SLUG, 'read')` is rejected by
   // the audit — "resolves to no string constant in this repository — fail, do not guess". This
   // asserts the constants are literal assignments rather than computed, which is the property the
   // derivation depends on and which a refactor would silently remove.
@@ -154,7 +154,7 @@ test('the three scope constants are LITERALS the estate derivation can resolve',
 /**
  * §12's test 13, measured.
  *
- * The rule is a CI grep, not a lint rule (`service-ci.yml:1036-1056`, exiting 1 on a hit), with an
+ * The rule is a CI grep, not a lint rule (`service-ci.yml`, exiting 1 on a hit), with an
  * inline `cfctl-allow setInterval` comment as the only escape hatch. §11.4: "Tessera uses no
  * escape hatch". This checks both halves, because a repository that adds a timer AND an allow
  * comment passes the estate's grep and fails this.
@@ -178,7 +178,7 @@ test('no interval timer doing domain work, and no CI escape hatch anywhere', () 
   // which explain at length why this repository takes no exemption. A guard that punishes writing
   // down the rule is a guard that gets the documentation deleted.
   //
-  // So it matches what CI actually means by an exemption: `service-ci.yml:1046` honours an INLINE
+  // So it matches what CI actually means by an exemption: `service-ci.yml` honours an INLINE
   // `cfctl-allow` on a line of CODE. A line whose content is entirely comment is prose about the
   // hatch; a line that has code on it AND the token is an exemption being taken. Only the second
   // is a violation, and that is exactly the distinction the estate's own grep draws.

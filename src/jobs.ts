@@ -5,7 +5,7 @@
  * **THERE IS NO `setInterval` IN THIS REPOSITORY AND NO `cfctl-allow` ESCAPE HATCH ANYWHERE.**
  *
  * §11.4 and §12's test 13. The rule is enforced by a CI grep, not a lint rule —
- * `org/.github/workflows/service-ci.yml:1036-1056`, exiting 1 on a hit, with an inline
+ * `org/.github/workflows/service-ci.yml`, exiting 1 on a hit, with an inline
  * `cfctl-allow setInterval` comment as the only way past it. This repository uses no escape hatch,
  * and `jobs.test.ts` greps its own source for both the timer and the hatch so the claim is
  * measured rather than asserted.
@@ -31,8 +31,8 @@
  *   |---------------------|--------------------|-------------------------------------------------|
  *   | outbox.relay        | `stream`           | The outbox stream. Keying on the event id would  |
  *   |                     |                    | let two relays deliver one batch twice. The same |
- *   |                     |                    | key market/src/jobs.ts:104-110 and               |
- *   |                     |                    | settlement/src/jobs.ts:91 both use.              |
+ *   |                     |                    | key market/src/jobs.ts and               |
+ *   |                     |                    | settlement/src/jobs.ts both use.              |
  *   | ward.mint           | `ward:<wardId>`    | The ward's occupancy, and the decision to mint a |
  *   |                     |                    | neighbour. Two runs mint two wards for one       |
  *   |                     |                    | crossing of 70%.                                 |
@@ -42,7 +42,7 @@
  *   |                     |                    | the pair that must not resolve concurrently.     |
  *   | kiln.fire           | `owner:<subject>`  | The player's place in the provider queue.        |
  *   |                     |                    | DELIBERATELY the same key shape studio uses      |
- *   |                     |                    | (studio/src/generation.ts:234), so one player's  |
+ *   |                     |                    | (studio/src/generation.ts), so one player's  |
  *   |                     |                    | firings serialise consistently on BOTH sides.    |
  */
 
@@ -217,7 +217,7 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
    * Fire an object against `micro-studio`.
    *
    * Keyed `owner:<subject>` — §11.4, "deliberately the same key shape studio uses
-   * (`studio/src/generation.ts:234`), so one player's firings serialise consistently on both
+   * (`studio/src/generation.ts`), so one player's firings serialise consistently on both
    * sides." A different key here would mean Tessera dispatching ten requests studio then
    * serialises anyway, with nine holding a lease slot for nothing.
    */
@@ -244,10 +244,10 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
         // THE ROW IS THE STATE, NOT THE PAYLOAD — AND THE PAYLOAD NEVER HELD THE PROMPT.
         //
         // This handler used to read `job.payload.prompt`, falling back to `''`. Nothing has ever
-        // put a prompt on that payload: `index.ts:254` enqueues `{ objectId, subject }`. So even
+        // put a prompt on that payload: `index.ts` enqueues `{ objectId, subject }`. So even
         // against a route that existed, every firing would have asked studio to generate from an
         // empty description — which studio refuses outright for a `world_object`
-        // (`studio/src/prompt.ts:143-145`), because an empty one "would silently generate 'a
+        // (`studio/src/prompt.ts`), because an empty one "would silently generate 'a
         // Tessera', which is not an object anybody asked for".
         //
         // The row holds the description, the author, and how far the last attempt got. Reading
@@ -310,16 +310,16 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
         //
         // The handler must RETHROW to get a retry — the runner's backoff is
         // min(1000 x 2^(attempt-1), 5 min) with full jitter, five attempts then `dead`
-        // (runtime/packages/jobs/src/index.ts:275-279, :90). A handler that marked the object
+        // (runtime/packages/jobs/src/index.ts, :90). A handler that marked the object
         // `failed` on its first error would turn one provider blip into a lost object.
         //
         // But a job that dead-letters silently leaves the object stuck on `firing` for ever, and
         // the runner's `dead` EVENT cannot fix that: `RunnerEvent` carries `kind`, `key`,
-        // `jobId` and `attempts` and NOT the payload (:297-305), and the lease key here names the
+        // `jobId` and `attempts` and NOT the payload, and the lease key here names the
         // OWNER rather than the object — deliberately, so firings serialise per player. So the
         // event has no way to say which object died.
         //
-        // `job.attempts` and `job.maxAttempts` are on the Job the handler already holds (:54-61),
+        // `job.attempts` and `job.maxAttempts` are on the Job the handler already holds,
         // so the last attempt marks the row and then rethrows anyway, which keeps the job's own
         // dead-letter accounting intact. Discovered by reading the runner rather than by assuming
         // the event carried enough — an earlier draft of this file wired a `dead` listener that

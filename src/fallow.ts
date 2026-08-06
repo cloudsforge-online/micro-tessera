@@ -14,7 +14,7 @@
  * and settled on write, so there is no nightly sweep marking parcels dead."
  *
  * A sweep is the obvious implementation and it is forbidden twice over. Once by CI — a
- * `setInterval` doing domain work exits 1 at `org/.github/workflows/service-ci.yml:1054`, with an
+ * `setInterval` doing domain work exits 1 at `org/.github/workflows/service-ci.yml`, with an
  * inline `cfctl-allow` comment as the only escape hatch, and this repository uses no escape hatch.
  * And once by arithmetic: a sweep over every parcel in every ward, nightly, to write a column that
  * is a pure function of three columns already on the row, is work that buys nothing. The index

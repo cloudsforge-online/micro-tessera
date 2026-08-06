@@ -7,10 +7,10 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  * A FIRING IS A LEASED JOB, NOT A REQUEST HANDLER — ON BOTH SIDES.
  *
- * `micro-studio` returns **202 with a `statusUrl`** (`studio/src/server.ts:469-480`);
- * `requestGeneration` opens no socket (`studio/src/generation.ts:173-238`) and `runGeneration`
+ * `micro-studio` returns **202 with a `statusUrl`** (`studio/src/server.ts`);
+ * `requestGeneration` opens no socket (`studio/src/generation.ts`) and `runGeneration`
  * executes inside a lease claimed `for update skip locked`. Its lease key is `owner:<subject>`
- * (`studio/src/generation.ts:234`).
+ * (`studio/src/generation.ts`).
  *
  * Tessera uses **the same key shape**, deliberately (§11.4): one player's firings serialise
  * consistently on both sides, so a player who fires ten objects at once cannot stampede the
@@ -18,8 +18,8 @@
  * requests that studio then serialises anyway, with nine of them holding a lease slot for nothing.
  *
  * The service token this calls with holds `studio:write`. §9.1: "A **service** principal skips
- * ownership narrowing entirely — `assertOwned` returns early at `studio/src/server.ts:576` — and
- * names the acting user via `body.userId` (`subjectOf`, `studio/src/server.ts:548-551`). So a
+ * ownership narrowing entirely — `assertOwned` returns early at `studio/src/server.ts` — and
+ * names the acting user via `body.userId` (`subjectOf`, `studio/src/server.ts`). So a
  * title can generate on a player's behalf without impersonating them."
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
@@ -64,7 +64,7 @@ export type Footprint = (typeof FOOTPRINTS)[number]
  * TWO, AND THE REASON IS A MISSING COLUMN IN SOMEBODY ELSE'S DATABASE.
  *
  * §2.1: "This is not laziness, it is forced: `micro-studio` has **no `seed` column** — the
- * generation schema at `studio/src/migrations.ts:154-252` records `prompt`, `backend_choice`,
+ * generation schema at `studio/src/migrations.ts` records `prompt`, `backend_choice`,
  * `backend`, `model`, `requested_size`, `attempts`, `cost_estimate`, `provider_cost_units`,
  * `credit_state` and `checksum`, and nothing else. **A pipeline that cannot fix a seed cannot
  * render the same chair four times.**"
@@ -137,7 +137,7 @@ export function toObject(row: ObjectRow): WorldObject {
 /**
  * The lease key one player's firings serialise on.
  *
- * `owner:<subject>` — the same shape `studio/src/generation.ts:234` uses. §11.4: "deliberately the
+ * `owner:<subject>` — the same shape `studio/src/generation.ts` uses. §11.4: "deliberately the
  * same key shape studio uses, so one player's firings serialise consistently on both sides."
  */
 export function firingLeaseKey(subject: string): string {
@@ -299,8 +299,8 @@ export async function completeFiring(sql: Db, outcome: FiringOutcome): Promise<W
 
     // `studio_asset_id` is NOT written here, and its emptiness is a fact about studio rather than
     // an omission: `GET /v1/jobs/:id` answers `{ job, provenance }` and neither carries the
-    // asset's id (`wireJob`, `studio/src/server.ts:513-533`; `provenanceOf`,
-    // `studio/src/generation.ts:465-487`). It exists on `studio.asset.created`, which this
+    // asset's id (`wireJob`, `studio/src/server.ts`; `provenanceOf`,
+    // `studio/src/generation.ts`). It exists on `studio.asset.created`, which this
     // service does not consume. The generation job id IS known, and is written by
     // `recordGeneration` when studio hands it over rather than here at the end.
     const rows = await tx<ObjectRow[]>`
@@ -379,8 +379,8 @@ export interface AnchorInput {
  * matters because it made the gap look like wiring rather than a contract that does not exist:
  *
  *   - `mint` deploys a CLOSED catalogue of three ERC-20 token contracts — `fixed | mintable |
- *     foundry` (`mint/src/catalogue.ts:28`) — each with bytecode committed beside it
- *     (`:43`, `:51`, `:60`), chosen by `variantFor(features)` over `mintable | burnable |
+ *     foundry` (`mint/src/catalogue.ts`) — each with bytecode committed beside it
+ *, chosen by `variantFor(features)` over `mintable | burnable |
  *     pausable`. There is no fourth variant and no route that deploys arbitrary bytecode, so there
  *     is no "existing path" a registry could travel down.
  *   - `hearth/contracts/src/` holds the HearthV2 AMM (Router, Factory, Pair, ERC20), WEMBER and
@@ -397,17 +397,17 @@ export interface AnchorInput {
  *      nobody sells is waste."
  *
  * The platform key is right and is not a blocker: a player cannot sign through custody, whose
- * signable purposes are `deployer | treasury | deposit` (`custody/src/gates.ts:35`) with `user`
- * deliberately excluded and the reason given at `:31`. §9.3 gates v2 PLAYER-SIGNED deeds on that;
+ * signable purposes are `deployer | treasury | deposit` (`custody/src/gates.ts`) with `user`
+ * deliberately excluded and the reason given. §9.3 gates v2 PLAYER-SIGNED deeds on that;
  * it does not gate v1.
  *
  * ── WHY THIS IS KEPT RATHER THAN DELETED ──────────────────────────────────────────────────────
  *
  * A registered topic nothing emits is usually dead code. This one is not, and the difference is
  * checkable: `micro-notify` has a COMPLETE, unblocked rule for `tessera.object.anchored`
- * (`notify/src/catalogue.ts:1137`) with a template (`notify/src/templates.ts:397`) and its own
+ * (`notify/src/catalogue.ts`) with a template (`notify/src/templates.ts`) and its own
  * tests, and `contracts` registers it as audited with `subjectKind: 'user'`
- * (`contracts/packages/events/src/audit.ts:323`) because "the platform acts with authority over a
+ * (`contracts/packages/events/src/audit.ts`) because "the platform acts with authority over a
  * user's property". Deleting the emitter would strand a written consumer and require editing two
  * other repositories to keep them honest.
  *

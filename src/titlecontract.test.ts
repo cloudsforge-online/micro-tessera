@@ -3,7 +3,7 @@
  *
  * §12's test 11: "`GET /v1/title` and `POST /v1/provision` satisfy `worlds`' client against the
  * real service, and provision replays idempotently on `entitlementId` — same `urn`,
- * `replayed: true` on the second ask, the way `worlds/src/conformance.ts:233-246` checks it."
+ * `replayed: true` on the second ask, the way `worlds/src/conformance.ts` checks it."
  */
 
 import { test, before, after, beforeEach } from 'node:test'
@@ -87,7 +87,7 @@ test('every declared capability is in the contracts closed set — a typo is a c
     assert.ok(isCapability(capability), `${capability} is not a capability worlds knows`)
   }
   // `private_world` is the one that matters: worlds' provisioning bridge calls a title ONLY when
-  // that capability holds (worlds/src/provisioning.ts:441-451), so without it the existing,
+  // that capability holds (worlds/src/provisioning.ts), so without it the existing,
   // currently-unserved world.private.small SKU still has no code path.
   assert.ok(CAPABILITIES.includes('private_world'))
   // And the two this title deliberately does NOT claim. Declaring a capability it cannot deliver
@@ -140,7 +140,7 @@ test('the ward slug is derived from the entitlement id, so two users cannot coll
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  * THE DERIVATION IS INJECTIVE, AND THE CASE BELOW IS THE ONE THAT WAS BROKEN IN PRODUCTION.
  *
- * `worlds/src/conformance.ts:182` mints `conformance-${crypto.randomUUID()}`. Under the previous
+ * `worlds/src/conformance.ts` mints `conformance-${crypto.randomUUID()}`. Under the previous
  * rule — strip non-alphanumerics, take twelve characters — `conformance` is ELEVEN characters, so
  * every conformance run in the estate's history maps to one of SIXTEEN slugs. The second run had
  * a fifteen-in-sixteen chance of colliding with the first.
@@ -191,7 +191,7 @@ test('provision raises a ward, and replays idempotently on entitlementId', { ski
     assert.equal(parsed.value.kind, 'ward')
   }
 
-  // The second ask: SAME urn, replayed true — worlds/src/conformance.ts:233-246.
+  // The second ask: SAME urn, replayed true — worlds/src/conformance.ts.
   const second = await provision(asDb(sql), request())
   assert.equal(second.urn, first.urn)
   assert.equal(second.replayed, true)

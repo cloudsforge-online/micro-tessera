@@ -5,9 +5,9 @@
  * ## The defect, as measured rather than as reasoned about (micro-org #222)
  *
  * `TESSERA_SERVICE_CREDENTIAL` held a token that lives **600 seconds**
- * (`identity/src/tokens.ts:33`). The composition root read it once, at import —
+ * (`identity/src/tokens.ts`). The composition root read it once, at import —
  * `token: async () => env.serviceCredential ?? ''` — and handed that one function to the studio
- * client (`index.ts:134`) and the ledger client (`:172`). On the live estate the JWT in that
+ * client (`index.ts`) and the ledger client. On the live estate the JWT in that
  * variable had been expired for **twenty-six hours** while the container reported healthy, because
  * `/livez` verifies nothing and presents the credential to nobody.
  *
@@ -77,7 +77,7 @@ const COMMUNITY = 'http://community:4000'
  */
 const CREDENTIAL = 'cfsc_0000000000000000000000-0000000000000test'
 
-/** identity/src/tokens.ts:33. Unchanged by this fix, and it must stay unchanged — rotation IS expiry. */
+/** identity/src/tokens.ts. Unchanged by this fix, and it must stay unchanged — rotation IS expiry. */
 const SERVICE_TTL_SECONDS = 600
 
 /** What this service actually demands of its own token, read from the files that declare it. */
@@ -107,8 +107,8 @@ afterEach(() => mock.timers.reset())
  * expiry by hand.
  *
  * Market is the exception and the asymmetry is the substance of that feature: it reads the SELLER
- * off the presented principal exactly as `market/src/server.ts:681` does through `subjectOf`
- * (`:1486`), and answers with that subject. So a service token leaking onto that seam does not fail
+ * off the presented principal exactly as `market/src/server.ts` does through `subjectOf`
+ *, and answers with that subject. So a service token leaking onto that seam does not fail
  * — it comes back as a listing whose seller is `service:tessera`, which is the silent theft
  * `marketclient.ts`'s header is about, and which the case at the foot of this file asserts against.
  * ══════════════════════════════════════════════════════════════════════════════════════════════ */
@@ -228,7 +228,7 @@ async function world(): Promise<World> {
       let seller: string
       try {
         const principal = await verifier.principal(presented)
-        // `subjectOf`, market/src/server.ts:1486 — the whole reason a service token must not reach
+        // `subjectOf`, market/src/server.ts — the whole reason a service token must not reach
         // market. Computed for every peer so it is one code path rather than a special case.
         seller = principal.kind === 'user' ? `user:${principal.userId}` : `service:${principal.service}`
         const need = peer === 'studio' ? 'studio:write' : peer === 'ledger' ? 'ledger:post' : null
@@ -513,9 +513,9 @@ test('no credential at all sends NOTHING, rather than `Authorization: Bearer ` w
 
 test('the MARKET client relays the SELLER’s bearer and never this service’s token', async () => {
   // The asymmetry is the substance of the listings feature, and a refactor that moves client
-  // construction into one module is exactly where it would be lost. `market/src/server.ts:681` reads
-  // the seller off the principal (`subjectOf`, `:1486`) and has no on-behalf-of lane, and
-  // `market/src/orders.ts:388` credits sale proceeds to that same subject — so a listing created
+  // construction into one module is exactly where it would be lost. `market/src/server.ts` reads
+  // the seller off the principal (`subjectOf`) and has no on-behalf-of lane, and
+  // `market/src/orders.ts` credits sale proceeds to that same subject — so a listing created
   // with this service's token pays the platform and the creator nothing, silently, with a valid
   // listing, a settled sale and a correct trial balance.
   clockAt(0)

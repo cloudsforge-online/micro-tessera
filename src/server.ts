@@ -16,7 +16,7 @@
  * (`addGate('requireScope', 1)`, and `resolveExpr` follows a sibling constant to its literal). A
  * gate it cannot resolve is FATAL to the build, deliberately: a demand it cannot read is a demand
  * it cannot prove is registered, and identity fail-fasts at import on a grant naming an unknown
- * scope (`identity/src/env.ts:141`).
+ * scope (`identity/src/env.ts`).
  *
  * Verified by running the estate's own extracted audit against this repository, not by reading the
  * workflow: it reports `tessera:provision`, `tessera:read` and `tessera:write`, each naming the
@@ -478,14 +478,14 @@ function buildRoutes(): Route[] {
     //    it, supply is elastic and only LOCATION is scarce. A world whose map you must register to
     //    look at has an account wall on the first arrow of its own loop.
     //
-    // **2. The estate has already settled this, in these words.** `worlds/src/server.ts:507` serves
+    // **2. The estate has already settled this, in these words.** `worlds/src/server.ts` serves
     //    the title registry unauthenticated under the note "a launcher listing games cannot require
     //    a token to do it". The Mosaic is that same object one level down: the list of places a
     //    launcher, a search engine or a stranger following a link needs in order to decide to come.
     //
     // **3. It was never a security boundary, only a registration wall.** The projection is
     //    `id, slug, name, archetype, ordinal, claimable_tiles, claimed_tiles, community_id,
-    //    instances, opened_at` (`world.ts:230`) — geography and occupancy, not one user-scoped or
+    //    instances, opened_at` (`world.ts`) — geography and occupancy, not one user-scoped or
     //    money field. And ANY account could already read it, while an account is free and
     //    self-serve. So the 401 excluded nobody it meant to; it only made a public map cost a
     //    signup. That is the test for whether removing a gate weakens authentication, and this one
@@ -504,7 +504,7 @@ function buildRoutes(): Route[] {
     //   * `tessera-web` had already written the conclusion down, in the client that renders this
     //     list: *"A shut gate is still openable as a screen — the parcel EXISTS and **the world is
     //     public**. … a world with invisible buildings is a world that feels empty when it is not"*
-    //     (`tessera-web/src/pages/world.tsx:128`). Its empty state is "Nothing has been claimed in
+    //     (`tessera-web/src/pages/world.tsx`). Its empty state is "Nothing has been claimed in
     //     this ward yet — **All of it is free.**"
     //   * And it BOUNDS the change rather than starting a slide: the arrivals screen makes exactly
     //     two calls, `listWards` and `listWardParcels`. It does not ask for presence. The next route
@@ -528,7 +528,7 @@ function buildRoutes(): Route[] {
     // No `authenticate` call at all, matching `worlds`: the response does not vary by principal, so
     // reading a token would be decoration, and a visitor whose access token has merely expired must
     // still see the world rather than an error. `tessera-web`'s `SignedOut` branch on this page
-    // (`tessera-web/src/pages/world.tsx:54`) becomes unreachable — it was a workaround for this
+    // (`tessera-web/src/pages/world.tsx`) becomes unreachable — it was a workaround for this
     // defect, written by somebody who had already worked out that the page is public.
     // ══════════════════════════════════════════════════════════════════════════════════════════
     define('GET', '/v1/wards', async (_ctx, deps) => ({
@@ -985,10 +985,10 @@ function buildRoutes(): Route[] {
      *
      * Every other write route in this service accepts a service token that names its user in
      * `x-user-id` (`requireUser`). This one cannot, and the reason is `micro-market`'s source:
-     * `POST /v1/listings` takes the seller from the token (`market/src/server.ts:681`,
-     * `subjectOf` at `:1486`) and market has no on-behalf-of lane. A service credential would
+     * `POST /v1/listings` takes the seller from the token (`market/src/server.ts`,
+     * `subjectOf`) and market has no on-behalf-of lane. A service credential would
      * therefore create a listing whose seller is `service:tessera`, and market credits sale
-     * proceeds to its own `sellerSubject` (`market/src/orders.ts:388`) — so the creator would be
+     * proceeds to its own `sellerSubject` (`market/src/orders.ts`) — so the creator would be
      * paid nothing while every test passed.
      *
      * The honest answer is a 403 that says so. Silently listing under the wrong subject is the
@@ -1055,7 +1055,7 @@ function buildRoutes(): Route[] {
      * surface. It names no user, so there is no membership to check — and accepting one would
      * make every service in the estate a voting member of every community"
      * (`community/src/server.ts`, `authenticateUser`). And `POST /v1/communities` takes the owner
-     * from the token, never from the body (`:547`).
+     * from the token, never from the body.
      *
      * So Tessera cannot found a ward's community with `TESSERA_SERVICE_CREDENTIAL`, and the
      * founder becomes the community's owner and first admin. A ward is platform-minted, so
@@ -1385,7 +1385,7 @@ async function authenticate(ctx: RequestContext, deps: ServerDeps): Promise<Prin
  * The write lane: a person, or a service acting for a named person.
  *
  * A service token must carry `tessera:write` AND name the user in `x-user-id`. That pairing is
- * aetherholm's and emberkin's (`aetherholm/src/server.ts:1034`, `emberkin/src/server.ts:453`),
+ * aetherholm's and emberkin's (`aetherholm/src/server.ts`, `emberkin/src/server.ts`),
  * and it is what lets a title act on a player's behalf without impersonating them — the same
  * shape studio offers Tessera in the other direction.
  */

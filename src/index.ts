@@ -121,7 +121,7 @@ const queue = new JobQueue(sql as unknown as JobsSql, { owner: env.instanceId })
 //
 // The BODY of this used to be here — `token: async () => env.serviceCredential ?? ''`, handed to
 // studio at :134 and to the ledger at :172 — and that is micro-org #222: a 600-second token
-// (`identity/src/tokens.ts:33`) read once at import and never renewed, measured expired for
+// (`identity/src/tokens.ts`) read once at import and never renewed, measured expired for
 // twenty-six hours on a container whose `/livez` answered 200 throughout.
 //
 // It moved to `src/upstreams.ts` for one reason: wiring in a composition root is wiring no test can

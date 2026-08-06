@@ -215,7 +215,7 @@ const EXPIRED_TOKEN = await new SignJWT({ typ: 'service', scopes: ['tessera:read
   .setIssuer('https://identity.test')
   .setAudience('cloudsforge')
   .setSubject('service:tessera')
-  // 600 seconds — identity/src/tokens.ts:33, and the reason this variable is a defect rather than
+  // 600 seconds — identity/src/tokens.ts, and the reason this variable is a defect rather than
   // a style preference.
   .setExpirationTime('600s')
   .sign(privateKey)

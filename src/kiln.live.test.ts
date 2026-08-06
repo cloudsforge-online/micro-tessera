@@ -9,7 +9,7 @@
  * green over that for the whole life of the service is that every cheap thing you can check about
  * a firing is true of a firing that never happens. A 202 in particular is worthless here: studio
  * answers 202 the instant it has written a row, before any model is contacted
- * (`studio/src/server.ts:412-416`, "THE GENERATION LEAVES THE REQUEST HERE"), so **a 202 is
+ * (`studio/src/server.ts`, "THE GENERATION LEAVES THE REQUEST HERE"), so **a 202 is
  * indistinguishable from a working Kiln.** So is an accepted `statusUrl`. So is a job that reaches
  * `running`.
  *
@@ -30,7 +30,7 @@
  *   TESSERA_TEST_STUDIO_TOKEN=<jwt>                       service:tessera, studio:read+studio:write
  *
  * The token is minted the way the estate mints it — `POST /service-tokens` on identity, as an
- * admin, exactly what `deploy/scripts/estate-bootstrap.sh:388` does — and it lasts ten minutes.
+ * admin, exactly what `deploy/scripts/estate-bootstrap.sh` does — and it lasts ten minutes.
  *
  * `skip`, never `return`: an unconfigured upstream shows as SKIPPED in the runner's summary. Six
  * tests in this estate `return`ed when their preconditions were absent and therefore PASSED,
@@ -232,7 +232,7 @@ test('a firing reaches fired, with studios own checksum and studios own brief', 
   assert.ok(prompt.includes(description), 'the players description is not in the prompt studio used')
   // The brand brief is NOT what a world object is generated to. `brandStyle()`'s opening clause,
   // asserted absent: run a stool through it and a logo of a stool comes back, deliberately-looking
-  // and undetectable downstream (`studio/src/specs.ts:37-55`).
+  // and undetectable downstream (`studio/src/specs.ts`).
   assert.equal(
     prompt.includes('Brand mark for a software company'),
     false,
@@ -241,7 +241,7 @@ test('a firing reaches fired, with studios own checksum and studios own brief', 
 
   // ── C2PA IS NULL, AND null IS NOT false ──────────────────────────────────────────────────
   // Studio measures it off the bytes and does not publish it on the job: neither `wireJob`
-  // (`studio/src/server.ts:513-533`) nor `provenanceOf` (`generation.ts:465-487`) carries it. So
+  // (`studio/src/server.ts`) nor `provenanceOf` (`generation.ts`) carries it. So
   // "nobody measured this" is the truth and `false` would be an assertion — one that would have
   // been wrong in the invisible direction on every firing this service ever does.
   assert.equal(kept?.c2pa, null, 'c2pa was asserted rather than measured')
@@ -337,7 +337,7 @@ test('an INTERRUPTED firing resumes its generation; it does not buy a second', {
 /* ══════════════════════════════════════════════════════════ studio's own refusals ══ */
 
 test('studio refuses to mint a kit for nobody — a service token must name the user', { skip }, async () => {
-  // `subjectUserId` (runtime/packages/auth/src/index.ts:227) throws `no_subject_user` for a
+  // `subjectUserId` (runtime/packages/auth/src/index.ts) throws `no_subject_user` for a
   // service principal with no `userId`. This is what stops a firing being owned by the platform,
   // and it is studio's guard rather than this client's — checked so the client's reliance on it
   // is a measured fact and not an assumption.

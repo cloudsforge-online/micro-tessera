@@ -6,20 +6,20 @@
  *
  * The obvious tidy-up is `scopeFor(SERVICE, 'read')`. micro-aetherholm started there and had to
  * undo it: the estate's scope audit rejects a computed demand — "'PROVISION_SCOPE' resolves to no
- * string constant in this repository — fail, do not guess" (`aetherholm/src/server.ts:121`). It is
+ * string constant in this repository — fail, do not guess" (`aetherholm/src/server.ts`). It is
  * right to. That audit proves every scope a gate demands exists in `contracts-auth`, so identity
  * can actually mint it — identity fail-fasts at import on a grant naming an unknown scope
- * (`identity/src/env.ts:141`), which means a scope missing from the registry is a
+ * (`identity/src/env.ts`), which means a scope missing from the registry is a
  * service-to-service surface no identity-issued token can ever reach, while every suite stays
  * green off its own fake principals.
  *
  * The derivation reads inline literals, sibling constants, wrapper arguments and computed families
- * closed over an enumerated set (`org/.github/workflows/service-ci.yml:495-597`), and treats
+ * closed over an enumerated set (`org/.github/workflows/service-ci.yml`), and treats
  * anything it cannot resolve as FATAL. Making it blind here to make the code prettier would trade
  * a real guarantee for a cosmetic one.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  *
- * `service:noun`, first segment equal to the service — `contracts/packages/auth/src/index.ts:150-153`.
+ * `service:noun`, first segment equal to the service — `contracts/packages/auth/src/index.ts`.
  */
 
 /** Read the world: wards, parcels, objects, placements, rankings, the title descriptor. */
@@ -31,7 +31,7 @@ export const WRITE_SCOPE = 'tessera:write'
 /**
  * Provision a Private Ward for a worlds entitlement. Held by `micro-worlds` alone.
  *
- * Aetherholm's precedent (`aetherholm/src/server.ts:119`, registered as `aetherholm:provision`),
+ * Aetherholm's precedent (`aetherholm/src/server.ts`, registered as `aetherholm:provision`),
  * and separate from `tessera:write` for the reason custody separates its signing scopes by
  * purpose: provisioning is the platform's act, driven by a paid entitlement, and a credential that
  * can place a chair should not automatically be able to raise a ward.

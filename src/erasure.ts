@@ -125,11 +125,11 @@
  * |                             |                     | the rest of this file cosmetic. The outbox |
  * |                             |                     | is NEVER PURGED — `relay` sets             |
  * |                             |                     | `published_at` and the row stays for ever  |
- * |                             |                     | (`outbox.ts:311`) — and it stores          |
+ * |                             |                     | (`outbox.ts`) — and it stores          |
  * |                             |                     | `actor = 'user:<uuid>'` plus the subject   |
  * |                             |                     | again inside `payload`                     |
- * |                             |                     | (`world.ts:442`, `:450`, `:683`,           |
- * |                             |                     | `economy.ts:803`, `kiln.ts:333`).          |
+ * |                             |                     | (`world.ts`,           |
+ * |                             |                     | `economy.ts`, `kiln.ts`).          |
  * |                             |                     | So after erasing everything else,          |
  * |                             |                     | `select actor, payload from outbox` would  |
  * |                             |                     | still hand an observer the person's        |
@@ -271,7 +271,7 @@ export async function eraseUser(tx: Tx, userId: string): Promise<ErasureCounts> 
   // one line rather than interpolated at nine call sites, because the estate already has the scar
   // for getting this wrong in the other direction: custody registered its ceremony topics
   // `keyedBy: 'user_id'` while the emit sites passed the ADDRESS, so every export event was filed
-  // against a user that does not exist (`topics.ts:19-22`). An erasure that ran against a bare
+  // against a user that does not exist (`topics.ts`). An erasure that ran against a bare
   // uuid would match nothing, touch nothing, and report success.
   // ════════════════════════════════════════════════════════════════════════════════════════════
   const subject = `user:${userId}`

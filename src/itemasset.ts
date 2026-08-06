@@ -21,13 +21,13 @@
  * `parseTitleUrn` splits on `:` and refuses anything that is not exactly four parts
  * (`contracts/packages/worlds/src/index.ts`), so an id of `sha256:<hex>` would make five and fail
  * to parse. The URN is built by the contract's `titleUrn` and then parsed BACK by the contract's
- * `parseTitleUrn` before it is returned — the same discipline `titlecontract.ts:93` applies to the
- * provision URN, and for the reason recorded at `contracts/packages/worlds/src/index.ts:200`:
+ * `parseTitleUrn` before it is returned — the same discipline `titlecontract.ts` applies to the
+ * provision URN, and for the reason recorded at `contracts/packages/worlds/src/index.ts`:
  * aetherholm builds its URN by template literal and never checks it, so its first malformed URN
  * will be discovered by a consumer.
  *
  * **`TOKEN:<urn>` is the contract's spelling, not one invented here.**
- * `contracts/packages/money/src/index.ts:56` defines `TokenAssetCode = \`TOKEN:${string}\`` and
+ * `contracts/packages/money/src/index.ts` defines `TokenAssetCode = \`TOKEN:${string}\`` and
  * describes it as "a user-minted token held custodially", which is exactly what a fired object is:
  * the platform holds the bytes, the creator holds the title to them.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -48,10 +48,10 @@ const CHECKSUM = /^sha256:([0-9a-f]{64})$/
  * The URN for a fired object, from its checksum.
  *
  * Refuses a checksum of any other shape rather than normalising one. The checksum IS the object's
- * identity (`studioclient.ts:133` refuses a reformat for the same reason): a function here that
+ * identity (`studioclient.ts` refuses a reformat for the same reason): a function here that
  * accepted a bare hex, or an uppercase one, would be the one place two spellings of one object
  * could be born, and `market.listings.item_urn` has no format constraint at all
- * (`market/src/migrations.ts:205`) to catch it on the way out.
+ * (`market/src/migrations.ts`) to catch it on the way out.
  */
 export function objectUrn(checksum: string): string {
   const matched = CHECKSUM.exec(checksum)

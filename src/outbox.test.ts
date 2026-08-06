@@ -280,7 +280,7 @@ test('an inbound delivery is verified over the RAW BYTES before it is parsed', {
   // ═══════════════════════════════════════════════════════════════════════════════════════
   // 403 THROUGHOUT, NOT 401. The MAC is the credential on this surface: there is no bearer
   // token that opens it and no token endpoint to go and find one at, so 401 — "authenticate
-  // and try again" — is advice that leads nowhere. `trade/src/server.ts:726-731` is the
+  // and try again" — is advice that leads nowhere. `trade/src/server.ts` is the
   // estate's reference implementation of the same choice.
   // ═══════════════════════════════════════════════════════════════════════════════════════
 
@@ -302,7 +302,7 @@ test('an inbound delivery is verified over the RAW BYTES before it is parsed', {
   //
   // `JSON.parse` then `JSON.stringify` is not the identity function — key order changes. A
   // receiver that verified over the re-serialised body would refuse every honest delivery, and
-  // the failure would look exactly like a secret mismatch. `activity/src/ingest.ts:76-95` says
+  // the failure would look exactly like a secret mismatch. `activity/src/ingest.ts` says
   // so; this proves the bytes genuinely differ, so the rule is about something.
   // ═══════════════════════════════════════════════════════════════════════════════════════
   const { payload, ...rest } = envelope
@@ -432,7 +432,7 @@ test('every source file signs through the contract — there is no local MAC to 
     assert.equal(
       source.includes(`${mac}(`),
       false,
-      `${file} rolls its own MAC — the contract signs (contracts/packages/events/src/index.ts:1272)`,
+      `${file} rolls its own MAC — the contract signs (contracts/packages/events/src/index.ts)`,
     )
     assert.equal(
       source.includes(scheme),

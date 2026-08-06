@@ -14,13 +14,13 @@
  * able to succeed, and could not have been: the body it sent had a `prompt` field, a `kind` and a
  * `userId`, and studio's real generate route takes none of those three.
  *
- * The route table is `studio/src/server.ts:363-507` and it is nine routes long. The two that
- * matter here are `POST /v1/brand-kits` (`:373`) and `POST /v1/brand-kits/:id/generate` (`:418`),
+ * The route table is `studio/src/server.ts` and it is nine routes long. The two that
+ * matter here are `POST /v1/brand-kits` and `POST /v1/brand-kits/:id/generate`,
  * and the shape of the second is the reason firing is TWO calls rather than one:
  *
  *   **studio takes no prompt.** `POST /v1/brand-kits/:id/generate` reads `kind`, `width`,
  *   `height`, `format` and `backend` from the body and nothing else. The prompt is BUILT by
- *   studio, in `buildPrompt` (`studio/src/prompt.ts:127-157`), out of the kind's own style
+ *   studio, in `buildPrompt` (`studio/src/prompt.ts`), out of the kind's own style
  *   paragraph and the BRAND KIT's `stylePrompt` — and it is built once and stored on the job, so
  *   that "editing prompt.ts changes what a delivered asset claims to have been generated from"
  *   cannot happen. A caller therefore does not send a prompt; it puts the player's description on
@@ -28,7 +28,7 @@
  *
  * That is not a workaround, it is the deliberate design of the service, and for `world_object` it
  * is better than what this client was doing: studio's `WORLD_OBJECT_STYLE`
- * (`studio/src/prompt.ts:85-92`) is the projection, the light and the ground, written once, on
+ * (`studio/src/prompt.ts`) is the projection, the light and the ground, written once, on
  * studio's side, where every consumer gets the same one. This client used to keep its own copy of
  * that paragraph — two spellings of one brief, in two repositories, with nothing comparing them.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -37,20 +37,20 @@
  *
  *   1. Tessera calls studio with a service token holding `studio:write`. A **service** principal
  *      skips ownership narrowing entirely — `assertOwned` returns early at
- *      `studio/src/server.ts:576` — and names the acting user via `body.userId` (`subjectOf`,
- *      `studio/src/server.ts:548-551`). So a title generates on a player's behalf without
- *      impersonating them. `subjectUserId` (`runtime/packages/auth/src/index.ts:220-229`) throws
+ *      `studio/src/server.ts` — and names the acting user via `body.userId` (`subjectOf`,
+ *      `studio/src/server.ts`). So a title generates on a player's behalf without
+ *      impersonating them. `subjectUserId` (`runtime/packages/auth/src/index.ts`) throws
  *      `no_subject_user` — a 401 — when a service omits it, so the kit CANNOT accidentally be
  *      owned by `service:tessera`; the brand kit belongs to the player, and it is checked below.
- *   2. Generate answers **202 with a `statusUrl`** (`studio/src/server.ts:469-480`). Generation is
+ *   2. Generate answers **202 with a `statusUrl`** (`studio/src/server.ts`). Generation is
  *      a leased job on studio's side too, so this client polls that URL rather than holding a
  *      socket open for a minute of diffusion.
  *   3. The status body is `{ job, provenance }` — **nested**, both halves. `job.status` is the
- *      state (`queued | running | succeeded | failed`, `generation.ts:51`) and the checksum is on
- *      `provenance`, not on `job`: `wireJob` (`server.ts:513-533`) does not carry it and
- *      `provenanceOf` (`generation.ts:465-487`) does. A client reading a flat body — which this
+ *      state (`queued | running | succeeded | failed`, `generation.ts`) and the checksum is on
+ *      `provenance`, not on `job`: `wireJob` (`server.ts`) does not carry it and
+ *      `provenanceOf` (`generation.ts`) does. A client reading a flat body — which this
  *      one used to — sees neither field and waits until its deadline.
- *   4. The checksum comes back `sha256:<hex>` (`studio/src/assets.ts:78-80`) and IS the object's
+ *   4. The checksum comes back `sha256:<hex>` (`studio/src/assets.ts`) and IS the object's
  *      identity.
  *
  * **The polling here is inside a leased job, not a timer.** It is a bounded `await` loop with an
@@ -67,12 +67,12 @@ import { OBJECT_CANVAS, STUDIO_ASSET_KIND } from './kiln.ts'
  * The kit's accent, which for a world object is not a colour anybody sees.
  *
  * `POST /v1/brand-kits` requires one and validates it against `ACCENT_PATTERN`
- * (`studio/src/brandkits.ts:167`). `buildPrompt` interpolates the accent only into
+ * (`studio/src/brandkits.ts`). `buildPrompt` interpolates the accent only into
  * `brandStyle()`, and `world_object` takes `WORLD_OBJECT_STYLE` instead
- * (`studio/src/prompt.ts:132-133`) — "the accent is not interpolated into it at all — a world
+ * (`studio/src/prompt.ts`) — "the accent is not interpolated into it at all — a world
  * object wears no product colour, because it is not chrome".
  *
- * So this is the estate's pinned GROUND (`brand/normalise_ground.py:27`, §2.1) rather than a
+ * So this is the estate's pinned GROUND (`brand/normalise_ground.py`, §2.1) rather than a
  * product accent, deliberately: a brand colour here would be a brand colour that is one edit to
  * somebody else's prompt file away from ending up on a player's chair.
  */
@@ -143,10 +143,10 @@ export interface GenerateOutcome {
   readonly prompt: string
   /**
    * MEASURED off the bytes by studio (`outcome.bytes.includes(C2PA_MARKER)`,
-   * `studio/src/backend.ts:460`) — and **not published on the job status**.
+   * `studio/src/backend.ts`) — and **not published on the job status**.
    *
    * `wireJob` and `provenanceOf` both omit it; it exists on the ASSET
-   * (the `Asset` interface, `studio/src/assets.ts:46-63`) and on the `studio.asset.created` event,
+   * (the `Asset` interface, `studio/src/assets.ts`) and on the `studio.asset.created` event,
    * neither of which this service can reach. So this is `null` — "not measured here" — rather than
    * `false`. `false` is an assertion, and it would be an assertion that was wrong in the invisible
    * direction on every single firing, which is precisely §2.2's "a repo that asserts it is a repo
@@ -186,7 +186,7 @@ export interface StudioClientOptions {
 /**
  * The kit name for one object, and it is the object id because a retry has to find it again.
  *
- * `brand_kits_owner_name_uniq` (`studio/src/migrations.ts:125`) makes a repeated name a 409, and
+ * `brand_kits_owner_name_uniq` (`studio/src/migrations.ts`) makes a repeated name a 409, and
  * studio serves no route that looks a kit up by name — so a name derived from anything varying
  * (a timestamp, a random suffix) leaks a kit per attempt, and a name that is stable but whose id
  * this service did not keep wedges the firing for ever. Hence `objects.studio_brand_kit_id`,
@@ -216,7 +216,7 @@ export function createStudioClient(options: StudioClientOptions): StudioClient {
       if (description.length === 0) {
         // Refused HERE rather than discovered as a 500 inside studio: `buildPrompt` throws
         // outright on a `world_object` with an empty `stylePrompt`
-        // (`studio/src/prompt.ts:143-145`), because "a firing with no description would otherwise
+        // (`studio/src/prompt.ts`), because "a firing with no description would otherwise
         // silently generate 'a Tessera', which is not an object anybody asked for".
         throw new StudioError('a firing has no description to build a prompt from')
       }
@@ -226,13 +226,13 @@ export function createStudioClient(options: StudioClientOptions): StudioClient {
         headers: await authorize(),
         body: {
           // Names the acting user WITHOUT impersonating them — the shape studio's service lane
-          // exists for (`subjectOf`, studio/src/server.ts:548-551). Omitting it is a 401, not a
+          // exists for (`subjectOf`, studio/src/server.ts). Omitting it is a 401, not a
           // kit quietly owned by `service:tessera`.
           userId: userIdOf(input.authorSubject),
           name: kitNameFor(input.objectId),
           accent: KIT_ACCENT,
           // The player's words, and only the player's words. Studio wraps them:
-          // "The object is: <stylePrompt>" (`studio/src/prompt.ts:151`).
+          // "The object is: <stylePrompt>" (`studio/src/prompt.ts`).
           stylePrompt: description.slice(0, 2_000),
         },
       })
@@ -267,9 +267,9 @@ export function createStudioClient(options: StudioClientOptions): StudioClient {
         body: {
           kind: STUDIO_ASSET_KIND,
           // `width`/`height`, NEVER `aspect_ratio`. FLUX ignores aspect_ratio; the wire contract
-          // is pinned at studio/src/backend.ts:12-17 and the lesson is repeated in all three
+          // is pinned at studio/src/backend.ts and the lesson is repeated in all three
           // asset repos' generator headers. Both are multiples of 16 — FLUX floors to a 16-pixel
-          // grid (studio/src/specs.ts:126-133) — so 512 needs no rounding.
+          // grid (studio/src/specs.ts) — so 512 needs no rounding.
           width: OBJECT_CANVAS,
           height: OBJECT_CANVAS,
         },
@@ -333,7 +333,7 @@ export function createStudioClient(options: StudioClientOptions): StudioClient {
         }
 
         if (state !== 'queued' && state !== 'running') {
-          // A state studio's own union does not have (`GenerationStatus`, generation.ts:51).
+          // A state studio's own union does not have (`GenerationStatus`, generation.ts).
           // Refused rather than treated as pending, which would spin until the deadline and then
           // report a timeout for what is actually a contract change.
           throw new StudioError(`studio reported an unknown generation status: ${state ?? 'none'}`)
@@ -371,7 +371,7 @@ function readBoolean(value: unknown, field: string): boolean | undefined {
  * An abortable sleep.
  *
  * `setTimeout`, not `setInterval`, and it does no domain work — it waits between two polls inside
- * a leased job. The CI grep at `service-ci.yml:1036-1056` looks for `setInterval`; this is the
+ * a leased job. The CI grep at `service-ci.yml` looks for `setInterval`; this is the
  * shape it is not looking for, and the reason is real rather than a technicality: an interval
  * fires whether or not the previous tick finished and outlives the lease that authorised it.
  */

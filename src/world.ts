@@ -640,7 +640,7 @@ export async function openContest(sql: Db, input: ContestInput): Promise<{ conte
       // ═══════════════════════════════════════════════════════════════════════════════════════
       // THE OWNER IS READ FIRST, `for update`, AND THAT IS WHAT MAKES THIS EVENT NOTIFIABLE.
       //
-      // `notify/src/topics.ts:299` records this topic as `blockedBy: 'no-subject'`, and it was
+      // `notify/src/topics.ts` records this topic as `blockedBy: 'no-subject'`, and it was
       // right: the payload named the CHALLENGER and nothing else, so a rule built on it would
       // answer `no_recipient` for ever, or — worse — tell the challenger that somebody's ground
       // had gone fallow. The person who needs this notification is the OWNER, who is about to
@@ -737,7 +737,7 @@ export async function transferParcel(sql: Db, input: TransferInput): Promise<Par
  * trade path and, on the contest path, an unexplained dead-lettered job.
  *
  * Found by writing the test rather than by reading the branch, which is the point: the branch
- * looked right. `claimParcel` has always had this correct (`translateClaimError` at `:449`, caught
+ * looked right. `claimParcel` has always had this correct (`translateClaimError`, caught
  * outside its own `withOutbox`), and its comment says why — "the deferred triggers raise at COMMIT
  * with no constraint name attached". That comment was two functions away from the code that
  * needed it.

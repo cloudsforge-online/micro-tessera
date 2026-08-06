@@ -10,16 +10,16 @@
  * never fail. So the two routes below are cited, and `marketclient.test.ts` asserts the request
  * this file builds against a stub that refuses anything market's own handler would refuse.
  *
- *   * `POST /v1/listings`            — `market/src/server.ts:673`. Answers the created listing.
- *   * `POST /v1/listings/:id/activate` — `market/src/server.ts:774`. Reserves the item, goes live.
+ *   * `POST /v1/listings`            — `market/src/server.ts`. Answers the created listing.
+ *   * `POST /v1/listings/:id/activate` — `market/src/server.ts`. Reserves the item, goes live.
  *
  * ──────────────────────────────────────────────────────────────────────────────────────────────
  * **THE CREATOR'S OWN TOKEN IS FORWARDED, AND A SERVICE TOKEN WOULD BE A SILENT THEFT.**
  *
  * This is the decision in this file, and it is forced by market's source rather than preferred:
  *
- *     const seller = subjectOf(principal)            market/src/server.ts:681
- *     function subjectOf(principal: Principal) {     market/src/server.ts:1486
+ *     const seller = subjectOf(principal)            market/src/server.ts
+ *     function subjectOf(principal: Principal) {     market/src/server.ts
  *       return principal.kind === 'user'
  *         ? `user:${subjectUserId(principal, undefined)}`
  *         : `service:${principal.service}`
@@ -28,14 +28,14 @@
  * There is no `x-user-id` lane on this route — the estate-wide on-behalf-of convention that
  * `aetherholm`, `emberkin`, `nda`, `wallet` and this service's own `requireUser` implement is
  * simply absent from market. So a listing created with Tessera's service credential is a listing
- * whose `sellerSubject` is the literal string `service:tessera`, and `market/src/orders.ts:388`
+ * whose `sellerSubject` is the literal string `service:tessera`, and `market/src/orders.ts`
  * credits sale proceeds to `subject: listing.sellerSubject`. **The money would land in Tessera's
  * own ledger account and the creator would be paid nothing** — silently, with every test passing,
  * because the listing is valid, the sale settles and the trial balance is correct.
  *
  * Forwarding the player's bearer token is safe here for a reason rather than by assumption: the
- * estate has ONE audience (`AUDIENCE = 'cloudsforge'`, `runtime/packages/auth/src/index.ts:38`,
- * and `index.test.ts:67` — "a wrong audience is refused — one audience for the whole estate"), so
+ * estate has ONE audience (`AUDIENCE = 'cloudsforge'`, `runtime/packages/auth/src/index.ts`,
+ * and `index.test.ts` — "a wrong audience is refused — one audience for the whole estate"), so
  * the token the player presented to Tessera is already a token market accepts. Relaying it grants
  * market nothing the player's own browser could not do by calling market directly. It is a relay,
  * not an escalation.
@@ -57,8 +57,8 @@ import { ASSET } from './sparks.ts'
  * `game_item`, which market already has.
  *
  * §10's "two repositories that need nothing": `asset_kind` already includes `game_item`
- * (`market/src/migrations.ts:245-247`) and `item_urn` has no format constraint at all
- * (`market/src/migrations.ts:205`). So the work is entirely on this side, and this constant is the
+ * (`market/src/migrations.ts`) and `item_urn` has no format constraint at all
+ * (`market/src/migrations.ts`). So the work is entirely on this side, and this constant is the
  * whole of what Tessera had to agree with.
  */
 export const MARKET_ASSET_KIND = 'game_item'
@@ -87,7 +87,7 @@ export class MarketError extends Error {
 
 /**
  * What market answered. Exactly the fields `listingWire` puts on the wire
- * (`market/src/server.ts:1341-1366`) that Tessera then has something to check.
+ * (`market/src/server.ts`) that Tessera then has something to check.
  */
 export interface MarketListing {
   readonly id: string
@@ -140,7 +140,7 @@ export function createMarketClient(options: MarketClientOptions): MarketClient {
         deadlineMs: 15_000,
         // In the body it is what market's `withIdempotentRoute` dedupes on; on the request it is
         // what makes a POST retriable at all, because `HttpClient` attempts a non-idempotent
-        // method exactly once without one. `ledgerclient.ts:150-153` says the same, and the two
+        // method exactly once without one. `ledgerclient.ts` says the same, and the two
         // must agree.
         idempotencyKey: input.idempotencyKey,
         requestId: input.correlationId,
@@ -155,7 +155,7 @@ export function createMarketClient(options: MarketClientOptions): MarketClient {
           pricingMode: MARKET_PRICING_MODE,
           settlementMode: MARKET_SETTLEMENT_MODE,
           // The PRICE's asset code — EMBER. `parseAmount` reads it as a decimal string
-          // (`market/src/money.ts:222`); a JSON number is an IEEE 754 double and 10^18 wei does
+          // (`market/src/money.ts`); a JSON number is an IEEE 754 double and 10^18 wei does
           // not survive one.
           price: input.priceWei.toString(),
           assetCode: ASSET satisfies LedgerAssetCode,
@@ -165,7 +165,7 @@ export function createMarketClient(options: MarketClientOptions): MarketClient {
           //
           // §7.2's fifth refusal — "the platform fee and the royalty cap are identical for every
           // account, and no SKU, tier or subscription reduces either". Market reads its fee from
-          // `deps.platformFeeBps`, its own environment (`market/src/server.ts:731`), and there is
+          // `deps.platformFeeBps`, its own environment (`market/src/server.ts`), and there is
           // no body field it would read one from. So Tessera cannot express a per-account fee to
           // market even by accident, and `marketclient.test.ts` asserts the exact key set of this
           // object against a literal list so that adding one cannot happen quietly.
@@ -186,7 +186,7 @@ export function createMarketClient(options: MarketClientOptions): MarketClient {
           requestId: input.correlationId,
           headers: { authorization: `Bearer ${input.sellerToken}` },
           // `onchainEscrowTx` is required ONLY for an `onchain` listing
-          // (`market/src/server.ts:786`) and every Tessera listing is custodial, so the body is
+          // (`market/src/server.ts`) and every Tessera listing is custodial, so the body is
           // deliberately empty rather than carrying a null that would look like an unfinished
           // branch.
           body: {},
@@ -204,7 +204,7 @@ export function createMarketClient(options: MarketClientOptions): MarketClient {
         // 409 (`ListingStateError`, `market/src/listings.ts`), for ever.
         //
         // So a refusal is re-read rather than trusted. `GET /v1/listings/:id`
-        // (`market/src/server.ts:658`) is the authority on what actually happened, and only a
+        // (`market/src/server.ts`) is the authority on what actually happened, and only a
         // listing market itself reports as `active` is accepted. A 409 for any OTHER reason —
         // frozen by a moderation case, sold, cancelled — still surfaces, because the re-read
         // says so.
@@ -248,7 +248,7 @@ async function call(
   } catch (err) {
     if (err instanceof HttpError) {
       // 403 `policy_denied` and 503 `listing_paused` are both real answers a seller must be able
-      // to read (`market/src/server.ts:678`, `:701`), so the status is carried rather than
+      // to read (`market/src/server.ts`), so the status is carried rather than
       // flattened to 502. A listing refused by policy is not a Tessera outage.
       throw new MarketError(
         err.status >= 500 ? 'market_unavailable' : 'market_refused',
