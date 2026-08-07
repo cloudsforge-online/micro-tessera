@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/tessera",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "Tessera: a persistent isometric world. Wards, parcels claimed free and reclaimed by a fallow clock, objects fired from a prompt, and EMBER earned rather than only spent.",
   "license": "MIT",
@@ -20,7 +20,7 @@
   "_runtimeDependencies": [
     "The @cloudsforge/* runtime and contract packages are consumed as file:/link: paths into the",
     "sibling repositories because they are not published yet. Once AD-02 lands they become registry",
-    "versions and these paths \u2014 plus the two named build contexts in the Dockerfile \u2014 are deleted.",
+    "versions and these paths — plus the two named build contexts in the Dockerfile — are deleted.",
     "tsx is a runtime dependency for the same reason: the unpublished packages resolve to their",
     "TypeScript sources."
   ],
