@@ -124,6 +124,7 @@
 
 import { HttpClient } from '@cloudsforge/http'
 import { ServiceTokenProvider, ServiceTokenUnavailableError, type ProviderEvent } from '@cloudsforge/auth'
+import { NO_SCOPES_REQUIRED } from '@cloudsforge/contracts-auth'
 import type { Logger } from '@cloudsforge/telemetry'
 import { createStudioClient, type StudioClient } from './studioclient.ts'
 import { createLedgerClient, type LedgerClient } from './ledgerclient.ts'
@@ -135,6 +136,31 @@ import { createCommunityClient, type CommunityClient } from './communityclient.t
 // the same "untestable therefore unchecked" property that let the cliff survive, and `service.ts`
 // exists in this repository because four modules learned it the hard way.
 import type { Env } from './env.ts'
+
+/**
+ * **Nothing beyond what the four clients below already declare**, and that is a statement about
+ * where a demand belongs rather than a claim that this process needs no authority.
+ *
+ * This module is the composition root for tessera's outbound calls: it mints the service token, it
+ * refreshes it, and it hands the bearer to every peer client. So `derive-grants.mjs` sees it build
+ * an `HttpClient` and name a bearer, and asks it what scopes it needs — a question this file cannot
+ * answer, because it makes no call of its own. Each demand belongs to the module that has the call
+ * site and can be checked against the route it dials:
+ *
+ *   * `./studioclient.ts`    — `studio:write` for `POST /v1/generations`, `studio:read` for the
+ *                              poll that follows it, deliberately not collapsed into the wider one
+ *                              because a generation is a real charge against studio's credits.
+ *   * `./ledgerclient.ts`    — `LEDGER_SCOPES`, exported there.
+ *   * `./marketclient.ts`    — nothing: every write relays **the player's own bearer**.
+ *   * `./communityclient.ts` — nothing, and community refuses a service token on the founding route
+ *                              outright.
+ *
+ * Answering here instead would put tessera's whole grant on one file that dials nothing, which is
+ * the shape of the hand-maintained compose map the derivation exists to have retired: a service
+ * entry no route can be read off. So: `NO_SCOPES_REQUIRED`, from the module that presents the
+ * credential, with the demands stated by the modules that spend it.
+ */
+export const UPSTREAM_SCOPES = NO_SCOPES_REQUIRED
 
 /** The subset of `Env` this needs. Named so a test does not have to build a whole environment. */
 export type UpstreamEnv = Pick<
