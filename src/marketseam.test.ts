@@ -36,6 +36,7 @@ import {
   stripComments,
 } from './testsupport.ts'
 import {
+  GRANT_ENTRY_KIND,
   activateListing,
   assertTermsAreIdentical,
   draftListing,
@@ -57,8 +58,14 @@ import {
   createCommunityClient,
   wardCommunitySlug,
 } from './communityclient.ts'
-import { CLEARING } from '@cloudsforge/contracts-money'
-import { issuePostings, balanceCheck, ONE_OBJECT } from './ledgerclient.ts'
+import { CLEARING, ENTRY_KINDS, isEntryKind } from '@cloudsforge/contracts-money'
+import {
+  issuePostings,
+  balanceCheck,
+  ONE_OBJECT,
+  ISSUE_ENTRY_KIND,
+  BOOKING_FEE_ENTRY_KIND,
+} from './ledgerclient.ts'
 import { bindWardCommunity, WorldError } from './world.ts'
 import { fromSparks } from './sparks.ts'
 
@@ -531,6 +538,26 @@ test('an object is issued liability-to-its-author against a clearing counterpart
   assert.equal(ONE_OBJECT, 1n)
   // Balanced before the socket opens, by the contract's own check.
   assert.doesNotThrow(() => balanceCheck(postings))
+})
+
+test('the issuance kind is one the LEDGER will actually accept', () => {
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // micro-org#407 §3. `item_issue` was written into this client and into nothing else: it was in
+  // neither `ENTRY_KINDS` nor micro-ledger's `journal_entries_kind_chk`, so `validateEntryRequest`
+  // answered every issuance `400 invalid_entry` before it opened a transaction and no object was
+  // ever brought into the books. The test the estate already had for exactly this — "the grant
+  // kind is one the LEDGER will actually accept", in contracts-money, written after
+  // `foresight.settlement_fee` posted nothing for months — was never given a Tessera counterpart.
+  // This is it. Spelling is not the assertion; MEMBERSHIP is.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  assert.equal(ISSUE_ENTRY_KIND, 'item_issue')
+  assert.ok(isEntryKind(ISSUE_ENTRY_KIND), 'the issuance kind must be in the closed vocabulary')
+  assert.ok(ENTRY_KINDS.includes(ISSUE_ENTRY_KIND))
+  // Every kind this client posts, on the same footing. A future call site that invents one is now
+  // a compile error (`PostEntryRequest.kind` is `EntryKind`), and this is the belt to that brace.
+  for (const kind of [ISSUE_ENTRY_KIND, BOOKING_FEE_ENTRY_KIND, GRANT_ENTRY_KIND]) {
+    assert.ok(isEntryKind(kind), `${kind} is not in the ledger's closed set`)
+  }
 })
 
 test('the estate had no other TOKEN: spelling to match, so this one is pinned', () => {

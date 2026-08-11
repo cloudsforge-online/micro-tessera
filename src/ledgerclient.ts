@@ -132,7 +132,16 @@ export class ReserveEmptyError extends LedgerError {
 }
 
 export interface PostEntryRequest {
-  readonly kind: string
+  /**
+   * The contract's closed vocabulary, NOT `string`.
+   *
+   * This was `string`, and it is the whole reason micro-org#407 §3 existed: `issueObjectToAuthor`
+   * posted `'item_issue'` — a kind nobody had ever added to `ENTRY_KINDS` or to micro-ledger's
+   * `journal_entries_kind_chk` — and the compiler had nothing to say about it. The ledger answered
+   * every issuance `400 invalid_entry`, so no micro-tessera object was ever brought into the books.
+   * The kind is real now; the type is what stops the next invented one from reaching a deployment.
+   */
+  readonly kind: EntryKind
   readonly actor: Actor
   readonly correlationId: string
   readonly idempotencyKey: string
@@ -185,6 +194,23 @@ export interface BookingFeeRequest {
  * reports 21-engagement-treasury.md is built on.
  */
 export const BOOKING_FEE_ENTRY_KIND: EntryKind = 'transfer'
+
+/**
+ * The entry kind an object issuance posts under.
+ *
+ * `item_issue`, and it is annotated `EntryKind` for the reason micro-org#407 §3 records: the
+ * literal used to sit inline in `issueObjectToAuthor` against a `kind: string` field, which made
+ * it a kind micro-tessera had invented and no ledger would take. Every activation was refused.
+ * With the annotation, the day someone renames or removes it from `ENTRY_KINDS` this line fails to
+ * compile instead of the estate failing to issue.
+ *
+ * Not `reward_granted` (the world paying a player for something they did), not `purchase` (nobody
+ * bought this), not `adjustment` (a correction). Issuance is its own event: a unit of a `TOKEN:`
+ * asset coming into existence, credited to its author against clearing. It is worth its own word
+ * because "how many of this object exist, and when did each appear" is a question the journal
+ * should answer without a join.
+ */
+export const ISSUE_ENTRY_KIND: EntryKind = 'item_issue'
 
 export interface LedgerClient {
   postEntry(request: PostEntryRequest): Promise<{ id: string; replayed: boolean }>
@@ -437,6 +463,21 @@ function translate(err: unknown): Error {
       `the ledger has already reversed this hold: ${message}. The money is not stranded — it is ` +
         'back in the booker\'s `available` — but this service did not do it and cannot record ' +
         'which entry did, so the booking stays open for a person to look at.',
+    )
+  }
+  // `invalid_entry` is the ledger saying THIS REQUEST is wrong — an unknown kind, a missing field,
+  // postings that do not balance (`ledger/src/entries.ts` `validateEntryRequest`, surfaced as a
+  // 400 by its `server.ts`). Named here because without this branch it fell through to
+  // `ledger_unavailable` below, and micro-org#407 §3 is what that costs: every object activation
+  // failed with "the ledger is unavailable" while the ledger was up and answering correctly. An
+  // operator reading that goes and looks at the wrong service. A bad request is also the one
+  // failure retrying cannot fix, so it is a 500 on this service rather than a 502 about another.
+  if (message.includes('invalid_entry') || message.includes('unknown entry kind')) {
+    return new LedgerError(
+      'ledger_rejected_entry',
+      `the ledger refused this entry as malformed: ${message}. This is a defect in THIS service — ` +
+        'the ledger is answering. Retrying will not help.',
+      500,
     )
   }
   if (err instanceof LedgerError) return err
@@ -820,7 +861,7 @@ export async function issueObjectToAuthor(
   input: { author: string; assetCode: TokenAssetCode; correlationId: string },
 ): Promise<{ id: string; replayed: boolean }> {
   return ledger.postEntry({
-    kind: 'item_issue',
+    kind: ISSUE_ENTRY_KIND,
     actor: 'system',
     correlationId: input.correlationId,
     idempotencyKey: `tessera:issue:${input.assetCode}`,
