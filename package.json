@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/tessera",
-  "version": "2026.8.76",
+  "version": "2026.8.77",
   "private": true,
   "description": "Tessera: a persistent isometric world. Wards, parcels claimed free and reclaimed by a fallow clock, objects fired from a prompt, and EMBER earned rather than only spent.",
   "license": "MIT",
