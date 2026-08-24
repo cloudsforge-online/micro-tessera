@@ -15,7 +15,7 @@
  */
 
 import postgres from 'postgres'
-import { migrate, type Sql as DbSql } from '@cloudsforge/db'
+import { migrate, networkSql, type NetworkSql, type Sql as DbSql } from '@cloudsforge/db'
 import { Logger, Metrics } from '@cloudsforge/telemetry'
 import { MIGRATIONS, TABLES } from './migrations.ts'
 import { registerServiceMetrics } from './server.ts'
@@ -177,4 +177,16 @@ export function stripComments(source: string): string {
  */
 export function stripQuotedProse(source: string): string {
   return source.replace(/'(?:[^'\\\n]|\\.)*'/g, "''").replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+}
+
+/**
+ * One handle, presented as the per-network selector `createServer` now takes.
+ *
+ * The suites run against a single test database, so mainnet is the only configured network — which
+ * exercises the REFUSAL path for free: anything that asks this for testnet throws
+ * `NetworkNotConfiguredError` rather than quietly reusing the handle it does have. That refusal is
+ * the property the whole consolidation rests on; see micro-deploy `docs/network-consolidation.md`.
+ */
+export function singleNetworkSql(handle: unknown): NetworkSql {
+  return networkSql({ mainnet: handle as DbSql })
 }

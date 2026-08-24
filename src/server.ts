@@ -49,6 +49,8 @@ import {
 } from '@cloudsforge/contracts-worlds'
 import { EVENT_ID_HEADER, SIGNATURE_HEADER } from '@cloudsforge/contracts-events'
 import type { Lifecycle } from '@cloudsforge/lifecycle'
+import { NetworkUnknownError, requestNetwork, type Network } from '@cloudsforge/http'
+import type { NetworkSql } from '@cloudsforge/db'
 import { Metrics, newRequestId, type Logger } from '@cloudsforge/telemetry'
 import { PROVISION_SCOPE, READ_SCOPE, WRITE_SCOPE } from './scopes.ts'
 import { handleDelivery } from './inbound.ts'
@@ -113,7 +115,16 @@ export interface ServerDeps {
   readonly logger: Logger
   readonly metrics: Metrics
   readonly verifier: PrincipalVerifier
-  readonly sql: Db
+  /**
+   * The per-network SELECTOR, not a handle. Routes use `ctx.sql`; `NetworkSql` has no query
+   * methods, so reaching for the process-wide handle does not compile.
+   */
+  readonly sql: NetworkSql
+  /**
+   * The network to assume when no `CF-Network` arrives, or `undefined` to refuse. `CF_NETWORK_SINGLE`,
+   * for `pnpm dev`, which has no gateway in front of it. Never set in production.
+   */
+  readonly singleNetwork?: Network
   readonly presence?: PresenceHub
   /** True when a Kiln upstream is configured. Absent is a supported mode — see `env.ts`. */
   readonly kilnConfigured?: boolean
@@ -252,7 +263,34 @@ interface RequestContext {
   readonly requestId: string
   readonly log: Logger
   readonly params: Readonly<Record<string, string>>
+  /**
+   * The network THIS REQUEST belongs to, from the `CF-Network` header the gateway stamped.
+   *
+   * Not a property of the process: one pod serves both estates since the network consolidation
+   * (micro-deploy `docs/network-consolidation.md`), so "which network am I" has no answer.
+   */
+  readonly network: Network
+  /**
+   * The database handle for `network`, resolved ONCE, at the edge of the request.
+   *
+   * Every route uses this rather than reaching for the process-wide handle, because a wrong handle
+   * is not an error — it is a query that SUCCEEDS against the other estate's rows and says nothing.
+   * `deps.sql` is a `NetworkSql` with no query methods, so the mistake does not compile.
+   */
+  readonly sql: Db
 }
+
+/**
+ * Routes that answer without belonging to a network.
+ *
+ * Kubelet probes the first two and Prometheus scrapes the third; none arrives through the gateway,
+ * so none carries `CF-Network`. Refusing them turns a data-isolation rule into a CrashLoopBackOff —
+ * which is exactly what agora's first build did: 500 on every probe, container never ready.
+ *
+ * A literal SET rather than a prefix, because this is an exemption from a data boundary and
+ * widening it should be a deliberate edit. Every member must answer without touching the database.
+ */
+const OPERATIONAL_ROUTES: ReadonlySet<string> = new Set(['/livez', '/readyz', '/metrics'])
 
 interface Route {
   readonly method: string
@@ -313,7 +351,7 @@ export function createServer(deps: ServerDeps): Server {
     inFlight += 1
     deps.metrics.set('http_requests_in_flight', inFlight)
 
-    const finish = (status: number) => {
+    const finish = (status: number, metricNetwork: string) => {
       inFlight -= 1
       deps.metrics.set('http_requests_in_flight', inFlight)
       const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6
@@ -328,20 +366,47 @@ export function createServer(deps: ServerDeps): Server {
       })
     }
 
-    void handle(matched, { req, url, requestId, log, params }, deps)
+    // ── THE NETWORK, THEN THE HANDLE, BEFORE ANY ROUTE RUNS ──────────────────────────────────
+    //
+    // `requestNetwork` REFUSES an unstamped request rather than assuming mainnet: a 500 is a
+    // routing fault made loud, where a default is a cross-network write nothing would ever flag.
+    //
+    // The operational endpoints are exempt because kubelet and Prometheus do not come through the
+    // gateway and never send the header. Refusing them makes the pod never become ready.
+    const networkless = matched !== undefined && OPERATIONAL_ROUTES.has(matched.path)
+    let network: Network
+    try {
+      network = networkless
+        ? (deps.singleNetwork ?? deps.sql.networks[0] ?? 'mainnet')
+        : requestNetwork(req.headers, deps.singleNetwork ? { fallback: deps.singleNetwork } : {})
+    } catch (err) {
+      log.error('request carries no usable network', {
+        err: err instanceof NetworkUnknownError ? err.message : err,
+      })
+      send(
+        res,
+        errorReply(500, 'network_unknown', 'this request could not be attributed to a network', requestId),
+        requestId,
+      )
+      finish(500, 'unknown')
+      return
+    }
+
+    const sql = deps.sql.for(network) as unknown as Db
+    void handle(matched, { req, url, requestId, log, params, network, sql }, deps)
       .then((reply) => {
         if (reply.stream) {
-          finish(reply.status)
+          finish(reply.status, network)
           reply.stream(res)
           return
         }
         send(res, reply, requestId)
-        finish(reply.status)
+        finish(reply.status, network)
       })
       .catch((err: unknown) => {
         log.error('request handler threw after mapping', { err })
         send(res, errorReply(500, 'internal', 'the request could not be completed', requestId), requestId)
-        finish(500)
+        finish(500, network)
       })
   })
 }
@@ -446,7 +511,7 @@ function buildRoutes(): Route[] {
 
       const done = deps.lifecycle.track()
       try {
-        const outcome = await provision(deps.sql, parsed.value)
+        const outcome = await provision(ctx.sql, parsed.value)
         deps.metrics.increment('tessera_provisions_total', {
           outcome: outcome.replayed ? 'replayed' : 'provisioned',
         })
@@ -531,29 +596,29 @@ function buildRoutes(): Route[] {
     // (`tessera-web/src/pages/world.tsx`) becomes unreachable — it was a workaround for this
     // defect, written by somebody who had already worked out that the page is public.
     // ══════════════════════════════════════════════════════════════════════════════════════════
-    define('GET', '/v1/wards', async (_ctx, deps) => ({
+    define('GET', '/v1/wards', async (ctx, deps) => ({
       status: 200,
-      body: { wards: await listWards(deps.sql) },
+      body: { wards: await listWards(ctx.sql) },
     })),
 
     define('GET', '/v1/wards/:id', async (ctx, deps) => {
-      const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
+      const ward = await findWard(ctx.sql, ctx.params['id'] ?? '')
       if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
       return { status: 200, body: { ward } }
     }),
 
     define('GET', '/v1/wards/:id/parcels', async (ctx, deps) => {
-      const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
+      const ward = await findWard(ctx.sql, ctx.params['id'] ?? '')
       if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
-      return { status: 200, body: { parcels: await listParcelsIn(deps.sql, ward.id) } }
+      return { status: 200, body: { parcels: await listParcelsIn(ctx.sql, ward.id) } }
     }),
 
     define('GET', '/v1/wards/:id/presence', async (ctx, deps) => {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
-      const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
+      const ward = await findWard(ctx.sql, ctx.params['id'] ?? '')
       if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
-      return { status: 200, body: { avatars: await whoIsIn(deps.sql, ward.id) } }
+      return { status: 200, body: { avatars: await whoIsIn(ctx.sql, ward.id) } }
     }),
 
     define('GET', '/v1/parcels/:id', async (ctx, deps) => {
@@ -561,11 +626,11 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const id = ctx.params['id'] ?? ''
       if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
-      const parcel = await findParcel(deps.sql, id)
+      const parcel = await findParcel(ctx.sql, id)
       if (!parcel) return errorReply(404, 'not_found', 'no such parcel', ctx.requestId)
       return {
         status: 200,
-        body: { parcel, placements: await listPlacements(deps.sql, parcel.id) },
+        body: { parcel, placements: await listPlacements(ctx.sql, parcel.id) },
       }
     }),
 
@@ -574,7 +639,7 @@ function buildRoutes(): Route[] {
     define('GET', '/v1/parcels/fallow', async (ctx, deps) => {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
-      return { status: 200, body: { parcels: await listFallow(deps.sql) } }
+      return { status: 200, body: { parcels: await listFallow(ctx.sql) } }
     }),
 
     /* ------------------------------------------------------------------ discovery, read */
@@ -587,14 +652,14 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const wardParam = ctx.url.searchParams.get('wardId')
       const wardId = wardParam && UUID.test(wardParam) ? wardParam : null
-      return { status: 200, body: { parcels: await rankParcels(deps.sql, wardId) } }
+      return { status: 200, body: { parcels: await rankParcels(ctx.sql, wardId) } }
     }),
 
     // The one set of terms, for everybody. There is no `subject` parameter and there must not be.
     define('GET', '/v1/terms', async (ctx, deps) => {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
-      const terms = await platformTerms(deps.sql)
+      const terms = await platformTerms(ctx.sql)
       return {
         status: 200,
         body: {
@@ -621,7 +686,7 @@ function buildRoutes(): Route[] {
       // platform never sells it. `world.test.ts` asserts the absence of both from this file.
       const done = deps.lifecycle.track()
       try {
-        const parcel = await claimParcel(deps.sql, {
+        const parcel = await claimParcel(ctx.sql, {
           wardId,
           ownerSubject: subject,
           tier,
@@ -641,7 +706,7 @@ function buildRoutes(): Route[] {
       const { subject } = await requireUser(ctx, deps)
       const id = ctx.params['id'] ?? ''
       if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
-      const parcel = await bankParcel(deps.sql, {
+      const parcel = await bankParcel(ctx.sql, {
         parcelId: id,
         ownerSubject: subject,
         correlationId: ctx.requestId,
@@ -656,7 +721,7 @@ function buildRoutes(): Route[] {
       // The thirty days are checked by the DATABASE, on its own clock, inside the insert. This
       // route does not check them: a second answer to the same question is a second thing that
       // can be wrong, and only one of the two runs inside the transaction.
-      const outcome = await openContest(deps.sql, {
+      const outcome = await openContest(ctx.sql, {
         parcelId: id,
         challengerSubject: subject,
         correlationId: ctx.requestId,
@@ -675,7 +740,7 @@ function buildRoutes(): Route[] {
       if (typeof body['isVenue'] === 'boolean') flags.isVenue = body['isVenue']
       if (typeof body['isWorkshop'] === 'boolean') flags.isWorkshop = body['isWorkshop']
       if (typeof body['gateOpen'] === 'boolean') flags.gateOpen = body['gateOpen']
-      const parcel = await setParcelFlags(deps.sql, id, subject, flags)
+      const parcel = await setParcelFlags(ctx.sql, id, subject, flags)
       return { status: 200, body: { parcel } }
     }),
 
@@ -696,7 +761,7 @@ function buildRoutes(): Route[] {
       if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
       const body = await readJson(ctx.req)
       const rateWei = parsePriceWei(body['rateWei'], 'rateWei')
-      const venue = await openVenue(deps.sql, id, subject, rateWei)
+      const venue = await openVenue(ctx.sql, id, subject, rateWei)
       return { status: 200, body: { venue: serialiseVenue(venue) } }
     }),
 
@@ -705,7 +770,7 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const id = ctx.params['id'] ?? ''
       if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
-      const venue = await venueOf(deps.sql, id)
+      const venue = await venueOf(ctx.sql, id)
       if (!venue) return errorReply(404, 'not_a_venue', 'that parcel is not a Venue', ctx.requestId)
       return { status: 200, body: { venue: serialiseVenue(venue) } }
     }),
@@ -743,7 +808,7 @@ function buildRoutes(): Route[] {
       const slot = parseSlot(body['slot'])
       const hours = body['hours'] === undefined ? 1 : requireInteger(body, 'hours', 1, 12)
 
-      const venue = await venueOf(deps.sql, id)
+      const venue = await venueOf(ctx.sql, id)
       if (!venue) {
         return errorReply(404, 'not_a_venue', 'no such Venue, or it posts no rate', ctx.requestId)
       }
@@ -763,7 +828,7 @@ function buildRoutes(): Route[] {
       })
 
       try {
-        const { bookingId } = await bookVenue(deps.sql, {
+        const { bookingId } = await bookVenue(ctx.sql, {
           parcelId: id,
           slot,
           hours,
@@ -772,7 +837,7 @@ function buildRoutes(): Route[] {
           reservationId: hold.reservationId,
           correlationId: ctx.requestId,
         })
-        const booking = await findBooking(deps.sql, bookingId)
+        const booking = await findBooking(ctx.sql, bookingId)
         return { status: 201, body: { booking: booking ? serialiseBooking(booking) : { id: bookingId } } }
       } catch (err) {
         // Best effort, and the failure is LOGGED rather than swallowed or rethrown: the caller's
@@ -801,7 +866,7 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const id = ctx.params['id'] ?? ''
       if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
-      const bookings = await listBookingsOf(deps.sql, id)
+      const bookings = await listBookingsOf(ctx.sql, id)
       return { status: 200, body: { bookings: bookings.map(serialiseBooking) } }
     }),
 
@@ -821,7 +886,7 @@ function buildRoutes(): Route[] {
       if (booking.ownerSubject !== subject) {
         throw new ForbiddenError("a booking is settled by the Venue's owner")
       }
-      const settled = await settleBooking(deps.sql, escrow, {
+      const settled = await settleBooking(ctx.sql, escrow, {
         bookingId: booking.id,
         actor: `user:${subject.slice('user:'.length)}`,
         correlationId: ctx.requestId,
@@ -846,7 +911,7 @@ function buildRoutes(): Route[] {
       if (booking.ownerSubject !== subject && booking.bookedBy !== subject) {
         throw new ForbiddenError('a booking is cancelled by its booker or the Venue owner')
       }
-      const cancelled = await cancelBooking(deps.sql, escrow, {
+      const cancelled = await cancelBooking(ctx.sql, escrow, {
         bookingId: booking.id,
         actor: `user:${subject.slice('user:'.length)}`,
         correlationId: ctx.requestId,
@@ -872,7 +937,7 @@ function buildRoutes(): Route[] {
       if (footprint !== '1x1' && footprint !== '2x2') {
         throw new BadRequestError('footprint is 1x1 or 2x2 — there are two, and §6.3 says why')
       }
-      const object = await requestFiring(deps.sql, {
+      const object = await requestFiring(ctx.sql, {
         authorSubject: subject,
         prompt,
         category,
@@ -890,7 +955,7 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const id = ctx.params['id'] ?? ''
       if (!UUID.test(id)) throw new BadRequestError('an object id is a uuid')
-      const object = await findObject(deps.sql, id)
+      const object = await findObject(ctx.sql, id)
       if (!object) return errorReply(404, 'not_found', 'no such object', ctx.requestId)
       return { status: 200, body: { object } }
     }),
@@ -900,14 +965,14 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const requested = ctx.url.searchParams.get('userId') ?? undefined
       const userId = isAdmin(principal) && requested ? requested : subjectUserId(principal, requested)
-      return { status: 200, body: { objects: await listObjectsOf(deps.sql, `user:${userId}`) } }
+      return { status: 200, body: { objects: await listObjectsOf(ctx.sql, `user:${userId}`) } }
     }),
 
     define('POST', '/v1/parcels/:id/placements', async (ctx, deps) => {
       const { subject } = await requireUser(ctx, deps)
       const parcelId = ctx.params['id'] ?? ''
       if (!UUID.test(parcelId)) throw new BadRequestError('a parcel id is a uuid')
-      const parcel = await findParcel(deps.sql, parcelId)
+      const parcel = await findParcel(ctx.sql, parcelId)
       if (!parcel) return errorReply(404, 'not_found', 'no such parcel', ctx.requestId)
       if (parcel.ownerSubject !== subject) throw new ForbiddenError('this parcel is not yours')
 
@@ -938,7 +1003,7 @@ function buildRoutes(): Route[] {
           placedBy: subject,
         }
       })
-      const outcome = await placeObjects(deps.sql, placements)
+      const outcome = await placeObjects(ctx.sql, placements)
       return { status: 201, body: outcome }
     }),
 
@@ -946,7 +1011,7 @@ function buildRoutes(): Route[] {
       const { subject } = await requireUser(ctx, deps)
       const id = ctx.params['id'] ?? ''
       if (!UUID.test(id)) throw new BadRequestError('a placement id is a uuid')
-      await removePlacement(deps.sql, id, subject)
+      await removePlacement(ctx.sql, id, subject)
       return { status: 204 }
     }),
 
@@ -966,7 +1031,7 @@ function buildRoutes(): Route[] {
       // NOTE what is NOT read from the body: `platformFeeBps` and `settlementMode`. The fee is
       // read from `platform_terms` and the mode is always custodial. A parameter that exists only
       // to be refused is a parameter somebody will one day wire to an entitlement. §7.2, §8.5.
-      const listing = await draftListing(deps.sql, {
+      const listing = await draftListing(ctx.sql, {
         objectId,
         sellerSubject: subject,
         priceWei,
@@ -1028,7 +1093,7 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const id = ctx.params['id'] ?? ''
       if (!UUID.test(id)) throw new BadRequestError('a listing id is a uuid')
-      const listing = await findListing(deps.sql, id)
+      const listing = await findListing(ctx.sql, id)
       if (!listing) return errorReply(404, 'not_found', 'no such listing', ctx.requestId)
       return { status: 200, body: { listing: serialiseListing(listing) } }
     }),
@@ -1038,7 +1103,7 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const requested = ctx.url.searchParams.get('userId') ?? undefined
       const userId = isAdmin(principal) && requested ? requested : subjectUserId(principal, requested)
-      const listings = await listListingsOf(deps.sql, `user:${userId}`)
+      const listings = await listListingsOf(ctx.sql, `user:${userId}`)
       return { status: 200, body: { listings: listings.map(serialiseListing) } }
     }),
 
@@ -1076,7 +1141,7 @@ function buildRoutes(): Route[] {
         )
       }
       if (!isAdmin(principal)) throw new ForbiddenError('role:admin')
-      const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
+      const ward = await findWard(ctx.sql, ctx.params['id'] ?? '')
       if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
       if (!deps.governance) {
         return errorReply(503, 'community_unconfigured', 'ward governance is not configured', ctx.requestId)
@@ -1100,10 +1165,10 @@ function buildRoutes(): Route[] {
 
     define('POST', '/v1/wards/:id/presence', async (ctx, deps) => {
       const { subject } = await requireUser(ctx, deps)
-      const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
+      const ward = await findWard(ctx.sql, ctx.params['id'] ?? '')
       if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
       const body = await readJson(ctx.req)
-      const avatar = await arrive(deps.sql, {
+      const avatar = await arrive(ctx.sql, {
         wardId: ward.id,
         subject,
         x: requireInteger(body, 'x', 0, 255),
@@ -1114,9 +1179,9 @@ function buildRoutes(): Route[] {
 
     define('DELETE', '/v1/wards/:id/presence', async (ctx, deps) => {
       const { subject } = await requireUser(ctx, deps)
-      const ward = await findWard(deps.sql, ctx.params['id'] ?? '')
+      const ward = await findWard(ctx.sql, ctx.params['id'] ?? '')
       if (!ward) return errorReply(404, 'not_found', 'no such ward', ctx.requestId)
-      await depart(deps.sql, ward.id, subject)
+      await depart(ctx.sql, ward.id, subject)
       return { status: 204 }
     }),
 
@@ -1128,7 +1193,7 @@ function buildRoutes(): Route[] {
       // The visitor is the AUTHENTICATED subject and is never read from the body. A body-supplied
       // visitor is synthetic footfall with extra steps, and footfall is half the ranking function.
       // The database refuses a non-`user:` subject as well (§8.6), so this is the first of two.
-      await recordVisit(deps.sql, {
+      await recordVisit(ctx.sql, {
         parcelId: id,
         visitorSubject: subject,
         dwellSeconds: requireInteger(body, 'dwellSeconds', 0, 86_400),
@@ -1142,7 +1207,7 @@ function buildRoutes(): Route[] {
       if (!UUID.test(id)) throw new BadRequestError('a parcel id is a uuid')
       const body = await readJson(ctx.req)
       try {
-        const beacon = await lightBeacon(deps.sql, id, subject, requireString(body, 'headline'))
+        const beacon = await lightBeacon(ctx.sql, id, subject, requireString(body, 'headline'))
         return { status: 201, body: { beacon } }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -1157,7 +1222,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/me/parcels', async (ctx, deps) => {
       const { subject } = await requireUser(ctx, deps)
-      return { status: 200, body: { parcels: await listParcelsOf(deps.sql, subject) } }
+      return { status: 200, body: { parcels: await listParcelsOf(ctx.sql, subject) } }
     }),
 
     /**
@@ -1251,7 +1316,7 @@ function buildRoutes(): Route[] {
     define('POST', '/v1/events', async (ctx, deps) => {
       const raw = await readRaw(ctx.req)
       const verdict = await handleDelivery(
-        { sql: deps.sql, logger: ctx.log, secrets: deps.eventAcceptSecrets },
+        { sql: ctx.sql, logger: ctx.log, secrets: deps.eventAcceptSecrets },
         raw,
         {
           [SIGNATURE_HEADER]: headerOf(ctx.req, SIGNATURE_HEADER),
@@ -1291,7 +1356,7 @@ function escrowUnconfigured(ctx: RequestContext): Reply {
 async function bookingFor(ctx: RequestContext, deps: ServerDeps): Promise<Booking> {
   const id = ctx.params['id'] ?? ''
   if (!UUID.test(id)) throw new BadRequestError('a booking id is a uuid')
-  const booking = await findBooking(deps.sql, id)
+  const booking = await findBooking(ctx.sql, id)
   if (!booking) throw new WorldError('not_found', 'no such booking', 404)
   return booking
 }
