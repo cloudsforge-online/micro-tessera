@@ -33,6 +33,7 @@
  * first hex digit, which is not a contrivance: it is the one-in-sixteen that was going to happen.
  */
 
+import { singleNetworkSql } from './testsupport.ts'
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer as createHttpServer, type Server } from 'node:http'
@@ -78,7 +79,8 @@ before(async () => {
     // error mapping and the status line are all the real ones — and the error mapping is the
     // thing on trial, so it is the one part that could not have been faked.
     verifier: { principal: async () => WORLDS },
-    sql: asDb(sql),
+    sql: singleNetworkSql(asDb(sql)),
+    singleNetwork: 'mainnet' as const,
     eventAcceptSecrets: [TEST_EVENT_SECRET],
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))

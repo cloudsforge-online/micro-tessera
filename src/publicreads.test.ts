@@ -26,6 +26,7 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
+import { singleNetworkSql } from './testsupport.ts'
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Server } from 'node:http'
@@ -68,7 +69,8 @@ before(async () => {
         throw new Error('no principal: this visitor is signed out')
       },
     },
-    sql: asDb(sql),
+    sql: singleNetworkSql(asDb(sql)),
+    singleNetwork: 'mainnet' as const,
     eventAcceptSecrets: [TEST_EVENT_SECRET],
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
